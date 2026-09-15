@@ -31,7 +31,3 @@ services:
         sync: false
       - key: SMS_REQUEST_NUMBER
         sync: false
-    disk:
-      name: exit-poll-data
-      mountPath: /app/data
-      sizeGB: 1
