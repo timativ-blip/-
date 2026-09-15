@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: exit-poll
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: TIMEZONE
+        value: Europe/Moscow
+      - key: DATABASE_PATH
+        value: /app/data/exit_poll.sqlite3
+      - key: PRECINCTS_FILE
+        value: /app/precincts.json
+      - key: REFUSAL_DEMOGRAPHICS
+        value: "true"
+      - key: GOOGLE_SHEET_NAME
+        value: Анкеты
+      - key: GOOGLE_SPREADSHEET_ID
+        sync: false
+      - key: ACCESS_CODE
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/google-service-account.json
+      - key: SMS_GATEWAY_URL
+        sync: false
+      - key: SMS_GATEWAY_TOKEN
+        sync: false
+      - key: SMS_REQUEST_NUMBER
+        sync: false
+    disk:
+      name: exit-poll-data
+      mountPath: /app/data
+      sizeGB: 1
