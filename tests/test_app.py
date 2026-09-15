@@ -100,7 +100,7 @@ def test_sheets_timeout_retry_reuses_identical_range(client, survey, settings):
         assert db.execute("SELECT exported FROM surveys").fetchone()[0] == 0
     assert export_once(settings, lambda body: calls.append(copy.deepcopy(body))) == 1
     assert calls[0] == calls[1]
-    assert calls[0]["data"][1]["range"] == "'Анкеты'!A2:L2"
+    assert calls[0]["data"][1]["range"] == "'Анкеты'!A2:M2"
     assert calls[0]["valueInputOption"] == "RAW"
     assert export_once(settings, lambda _: pytest.fail("Already exported")) == 0
 
@@ -175,9 +175,86 @@ def test_production_rejects_missing_credentials(monkeypatch):
         Settings()
 
 
-def test_production_rejects_demo_precincts(monkeypatch):
+def test_production_rejects_demo_precincts(monkeypatch, tmp_path):
+    demo = tmp_path / 'demo.json'
+    demo.write_text('[{"id":"demo-001","label":"Demo"}]')
+    monkeypatch.setenv('PRECINCTS_FILE', str(demo))
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("ACCESS_CODE", "a-long-test-team-code")
     monkeypatch.setenv("SESSION_SECRET", "x" * 40)
     with pytest.raises(RuntimeError, match="demonstration precincts"):
         Settings()
+
+
+def test_catalog_has_all_pdf_entries(client):
+    catalog = client.get('/api/config').json()['precincts']
+    assert len(catalog) == 3925
+    assert len({p['id'] for p in catalog}) == 3925
+    assert len({p['tik'] for p in catalog}) == 56
+    by_id = {p['id']: p for p in catalog}
+    assert by_id['mo-uik-1']['tik'] == 'ТИК города Балашиха'
+    assert by_id['mo-uik-89']['tik'] == 'ТИК города Бронницы'
+    assert by_id['mo-uik-3765']['tik'] == 'ТИК поселка Звёздный городок'
+
+
+def test_tik_must_match_precinct(client, survey, settings):
+    survey['profile']['tik'] = 'ТИК города Бронницы'
+    assert client.post('/api/surveys', json=survey).status_code == 422
+    survey['profile']['tik'] = settings.precincts[0]['tik']
+    assert client.post('/api/surveys', json=survey).status_code == 200
+
+
+def test_tik_export_is_new_column(client, survey, settings):
+    survey['profile']['tik'] = settings.precincts[0]['tik']
+    client.post('/api/surveys', json=survey)
+    settings.spreadsheet = 'test'
+    calls = []
+    export_once(settings, calls.append)
+    assert calls[0]['data'][0]['values'][0][-1] == 'ТИК'
+    assert calls[0]['data'][1]['values'][0][12] == settings.precincts[0]['tik']
+    assert calls[0]['data'][1]['values'][0][7] == 'Новые люди'
+
+
+def test_export_after_db_reset_preserves_existing_sheet(client, survey, settings):
+    client.post('/api/surveys', json=survey)
+    settings.spreadsheet = 'test'
+    calls = []
+    export_once(settings, calls.append, read_ids=lambda: [['old-1'], [], ['old-3']])
+    assert calls[0]['data'][1]['range'] == "'Анкеты'!A5:M5"
+
+
+def test_retry_after_accepted_timeout_finds_existing_id(client, survey, settings):
+    client.post('/api/surveys', json=survey)
+    settings.spreadsheet = 'test'
+    remote = [['old-1']]
+    calls = []
+    def timeout(body):
+        calls.append(copy.deepcopy(body))
+        remote.append([survey['id']])
+        raise TimeoutError()
+    with pytest.raises(TimeoutError):
+        export_once(settings, timeout, read_ids=lambda: remote)
+    export_once(settings, calls.append, read_ids=lambda: remote)
+    assert calls[0] == calls[1]
+    assert calls[1]['data'][1]['range'] == "'Анкеты'!A3:M3"
+
+
+def test_sheet_read_failure_does_not_write(client, survey, settings):
+    client.post('/api/surveys', json=survey)
+    settings.spreadsheet = 'test'
+    def read_failure():
+        raise TimeoutError()
+    with pytest.raises(TimeoutError):
+        export_once(settings, lambda _: pytest.fail('Must not write'), read_ids=read_failure)
+    with connect(settings) as db:
+        assert db.execute('SELECT exported FROM surveys').fetchone()[0] == 0
+
+
+def test_old_demo_queue_still_accepted(client, survey, settings):
+    survey['profile']['precinct'] = 'demo-001'
+    assert client.post('/api/surveys', json=survey).status_code == 200
+    assert client.post('/api/surveys', json=survey).status_code == 200
+    settings.spreadsheet = 'test'
+    calls = []
+    export_once(settings, calls.append)
+    assert calls[0]['data'][1]['values'][0][-1] == ''

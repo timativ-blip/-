@@ -37,7 +37,7 @@ LABELS = dict(PARTIES)
 AGES = ["18–24", "25–34", "35–44", "45–60", "61+"]
 HEADERS = ["ID анкеты", "Время заполнения", "Дата смены", "Фамилия интервьюера",
            "Имя интервьюера", "ID УИК", "УИК", "Ответ", "Пол", "Возраст",
-           "ID смены", "Получено сервером"]
+           "ID смены", "Получено сервером", "ТИК"]
 
 
 class Settings:
@@ -75,6 +75,7 @@ class Profile(StrictModel):
     name: str = Field(min_length=1, max_length=80)
     precinct: str = Field(min_length=1, max_length=100)
     day: date
+    tik: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("surname", "name")
     @classmethod
@@ -159,44 +160,61 @@ def initialize(settings):
 
 
 def canonical(survey):
-    return json.dumps(survey.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+    payload = survey.model_dump(mode="json")
+    if payload["profile"]["tik"] is None:
+        del payload["profile"]["tik"]
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def sheets_values(row, settings):
     item = json.loads(row["payload"])
     profile = item["profile"]
-    precinct = next((p["label"] for p in settings.precincts if p["id"] == profile["precinct"]), profile["precinct"])
+    precinct = next((p for p in settings.precincts if p["id"] == profile["precinct"]), {})
     return [item["id"], item["created_at"], profile["day"], profile["surname"],
-            profile["name"], profile["precinct"], precinct, LABELS[item["party"]],
+            profile["name"], profile["precinct"], precinct.get("label", profile["precinct"]), LABELS[item["party"]],
             {"male": "Мужской", "female": "Женский"}.get(item["gender"], ""),
-            item["age"] or "", profile["id"], row["received_at"]]
+            item["age"] or "", profile["id"], row["received_at"], precinct.get("tik", profile.get("tik", ""))]
 
 
-def export_once(settings, transport=None):
-    """Write fixed row numbers: retrying an ambiguous timeout cannot append duplicates.
+def sheet_batch(rows, settings, existing_ids):
+    """Locate surveys by UUID, preserving rows after an ephemeral database reset.
 
-    This database exclusively owns its destination sheet. Never sort/delete rows there.
+    One exporter owns the sheet. Read failure must abort before any write.
     """
+    sheet = "'" + settings.sheet.replace("'", "''") + "'"
+    positions = {str(values[0]): index + 2 for index, values in enumerate(existing_ids) if values and values[0]}
+    next_row = len(existing_ids) + 2
+    data = [{"range": f"{sheet}!A1:M1", "values": [HEADERS]}]
+    for row in rows:
+        number = positions.get(row["id"])
+        if number is None:
+            number = next_row
+            next_row += 1
+            positions[row["id"]] = number
+        data.append({"range": f"{sheet}!A{number}:M{number}", "values": [sheets_values(row, settings)]})
+    return {"valueInputOption": "RAW", "data": data}
+
+
+def export_once(settings, transport=None, read_ids=None):
     if not settings.spreadsheet:
         return 0
     with connect(settings) as db:
         rows = db.execute("SELECT * FROM surveys WHERE exported=0 ORDER BY seq LIMIT 100").fetchall()
     if not rows:
         return 0
-    sheet = "'" + settings.sheet.replace("'", "''") + "'"
-    data = [{"range": f"{sheet}!A1:L1", "values": [HEADERS]}]
-    data.extend({"range": f"{sheet}!A{r['seq'] + 1}:L{r['seq'] + 1}",
-                 "values": [sheets_values(r, settings)]} for r in rows)
     if transport:
-        transport({"valueInputOption": "RAW", "data": data})
+        transport(sheet_batch(rows, settings, read_ids() if read_ids else []))
     else:
         import google.auth
         from google.auth.transport.requests import AuthorizedSession
         credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        base = f"https://sheets.googleapis.com/v4/spreadsheets/{quote(settings.spreadsheet, safe='')}/values"
+        sheet = "'" + settings.sheet.replace("'", "''") + "'"
         with AuthorizedSession(credentials) as session:
-            response = session.post(
-                f"https://sheets.googleapis.com/v4/spreadsheets/{quote(settings.spreadsheet, safe='')}/values:batchUpdate",
-                json={"valueInputOption": "RAW", "data": data}, timeout=20)
+            existing = session.get(base + "/" + quote(f"{sheet}!A2:A", safe=""), timeout=20)
+            existing.raise_for_status()
+            body = sheet_batch(rows, settings, existing.json().get("values", []))
+            response = session.post(base + ":batchUpdate", json=body, timeout=20)
             response.raise_for_status()
     with connect(settings) as db:
         db.executemany("UPDATE surveys SET exported=1 WHERE id=?", [(r["id"],) for r in rows])
@@ -301,8 +319,13 @@ def create_app(settings=None):
 
     @app.post("/api/surveys", dependencies=[Depends(authorized)])
     def submit(body: Survey):
-        if body.profile.precinct not in {p["id"] for p in settings.precincts}:
+        precinct = next((p for p in settings.precincts if p["id"] == body.profile.precinct), None)
+        # Keep pre-update demo surveys deliverable from the offline queue.
+        legacy_demo = body.profile.precinct in {"demo-001", "demo-002", "demo-003"} and body.profile.tik is None
+        if precinct is None and not legacy_demo:
             raise HTTPException(422, "Неизвестный УИК")
+        if body.profile.tik is not None and (not precinct or body.profile.tik != precinct.get("tik")):
+            raise HTTPException(422, "УИК не относится к выбранному ТИК")
         if body.created_at > datetime.now(timezone.utc) + timedelta(minutes=5):
             raise HTTPException(422, "Проверьте дату и время на телефоне")
         if body.created_at.astimezone(settings.zone).date() != body.profile.day:

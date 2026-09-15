@@ -21,7 +21,7 @@ function saveDraft() { store('draft', draft); }
 function currentDay() {
   if (profile?.day === today()) return true;
   profile = null; draft = null; store('profile', null); saveDraft(); screen = 'profile'; render();
-  toast('Начался новый день. Укажите имя и УИК для новой смены.');
+  toast('Начался новый день. Укажите имя, ТИК и УИК для новой смены.');
   return false;
 }
 async function openDatabase() {
@@ -114,15 +114,30 @@ async function updateStats() {
 function steps(n) { return `<div class="steps" aria-label="Шаг ${n} из 3">${[1,2,3].map(i=>`<span class="${i<=n?'done':''}"></span>`).join('')}</div><div class="section-kicker">АНКЕТА · ШАГ ${n} ИЗ 3</div>`; }
 function card(content) { return `<section class="card">${content}<p id="error" class="error" role="alert"></p></section>`; }
 const back = (target, text='Назад') => `<button class="back" data-action="${target}">← ${text}</button>`;
-const precinctLabel = () => config.precincts.find(p => p.id === profile?.precinct)?.label || profile?.precinct;
+const precinctLabel = () => {
+  const precinct = config.precincts.find(p => p.id === profile?.precinct);
+  return precinct ? [precinct.tik, precinct.label].filter(Boolean).join(' · ') : profile?.precinct;
+};
+const tikList = () => [...new Set(config.precincts.map(p => p.tik).filter(Boolean))].sort((a,b) => a.localeCompare(b,'ru'));
+function refreshPrecincts() {
+  const tik = $('#tik').value, query = $('#precinct-search').value;
+  const select = $('#precinct'), selected = select.value;
+  select.disabled = !tik;
+  $('#precinct-search').disabled = !tik;
+  const options = precinctOptions(query, tik);
+  select.innerHTML = `<option value="">${!tik ? 'Сначала выберите ТИК' : !options ? 'УИК не найден' : 'Выберите УИК'}</option>` + options;
+  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+}
+
 function render() {
   $('#toast').hidden = true;
   if (screen === 'profile') {
     const previous = stored('previous', {});
-    $('#app').innerHTML = card(`<div class="section-kicker">НАЧАЛО РАБОЧЕГО ДНЯ</div><div class="title-row"><h2>Ваша смена</h2><span class="tag">${escapeHTML(dateLabel())}</span></div><p class="muted">Представьтесь и выберите участок.<br>Это нужно сделать один раз в день.</p>
+    $('#app').innerHTML = card(`<div class="section-kicker">НАЧАЛО РАБОЧЕГО ДНЯ</div><div class="title-row"><h2>Ваша смена</h2><span class="tag">${escapeHTML(dateLabel())}</span></div><p class="muted">Представьтесь, выберите ТИК и свой УИК.<br>Это нужно сделать один раз в день.</p>
       <form id="profile-form"><div class="two-col"><div><label class="field" for="surname">Фамилия</label><input id="surname" name="surname" autocomplete="family-name" placeholder="Иванов" maxlength="80" required value="${escapeHTML(previous.surname || '')}"></div><div><label class="field" for="name">Имя</label><input id="name" name="name" autocomplete="given-name" placeholder="Иван" maxlength="80" required value="${escapeHTML(previous.name || '')}"></div></div>
-      <label class="field" for="precinct-search">Найти УИК</label><input id="precinct-search" type="search" placeholder="Номер участка или населённый пункт" autocomplete="off"><label class="field" for="precinct">Ваш УИК</label><select name="precinct" id="precinct" required><option value="">Выберите участок</option>${precinctOptions('')}</select>
-      ${config.demo?'<p class="hint">Тестовая версия. Демонстрационные УИК нужно заменить официальным списком перед запуском.</p>':''}
+      <label class="field" for="tik">Ваш ТИК</label><select name="tik" id="tik" required><option value="">Выберите территориальную комиссию</option>${tikList().map(tik=>`<option value="${escapeHTML(tik)}">${escapeHTML(tik)}</option>`).join('')}</select>
+      <label class="field" for="precinct-search">Найти УИК по номеру</label><input id="precinct-search" type="search" inputmode="numeric" placeholder="Например, 1259" autocomplete="off" disabled><label class="field" for="precinct">Ваш УИК</label><select name="precinct" id="precinct" required disabled><option value="">Сначала выберите ТИК</option></select><p class="hint">Показаны только УИК выбранной территориальной комиссии.</p>
+      
       <button class="primary action" type="submit">Сохранить и начать <span>→</span></button><p class="hint">Имя относится к интервьюеру. Личные данные респондента не запрашиваются.</p></form>`);
   } else if (screen === 'login') {
     $('#app').innerHTML = card(`<div class="section-kicker">ДОСТУП К ИССЛЕДОВАНИЮ</div><h2>Код вашей команды</h2><p class="muted">Код выдаёт координатор. Он защищает сбор анкет от посторонних отправок.</p><form id="login-form"><label for="code" class="field">Код доступа</label><input id="code" name="code" type="password" autocomplete="current-password" required><button class="primary action">Продолжить →</button></form>${profile?'<button class="text-button" data-action="home">Продолжить сбор офлайн</button>':''}`);
@@ -148,8 +163,11 @@ function render() {
       <p class="hint">Без интернета автоматический запрос SMS не дойдёт до сервера. Если работает сотовая сеть, можно отправить запрос на служебный номер, когда координатор подключит приём SMS.</p>${/^\+[1-9]\d{7,14}$/.test(number)?`<a href="sms:${escapeHTML(number)}?body=EXITPOLL" class="secondary">Открыть SMS с запросом</a>`:''}<hr class="divider"><button class="secondary" data-action="export">Скачать резервную копию анкет</button><p class="hint">Не очищайте данные браузера, пока все анкеты не переданы на сервер.</p>`);
   }
 }
-function precinctOptions(query) {
-  return config.precincts.filter(p=>p.label.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru'))||p.id.includes(query)).map(p=>`<option value="${escapeHTML(p.id)}">${escapeHTML(p.label)}</option>`).join('');
+function precinctOptions(query, tik) {
+  const needle = query.trim().replace(/^№\s*/, '');
+  return config.precincts.filter(p => p.tik === tik && (!needle || p.label.includes(needle)))
+    .sort((a,b) => a.label.localeCompare(b.label, 'ru', {numeric:true}))
+    .map(p=>`<option value="${escapeHTML(p.id)}">${escapeHTML(p.label)}</option>`).join('');
 }
 function go(target) { screen = target; render(); window.scrollTo({top:0}); }
 async function submitSurvey() {
@@ -182,7 +200,14 @@ async function requestSms(automatic=false) {
 }
 function maybeRequestSms() { if (stored('sms',{}).enabled) void requestSms(true); }
 document.addEventListener('input', event => {
-  if (event.target.id === 'precinct-search') $('#precinct').innerHTML = '<option value="">Выберите участок</option>' + precinctOptions(event.target.value);
+  if (event.target.id === 'precinct-search') refreshPrecincts();
+});
+document.addEventListener('change', event => {
+  if (event.target.id === 'tik') {
+    $('#precinct-search').value = '';
+    $('#precinct').value = '';
+    refreshPrecincts();
+  }
 });
 document.addEventListener('submit', async event => {
   event.preventDefault();
@@ -191,7 +216,9 @@ document.addEventListener('submit', async event => {
     if (form.id === 'profile-form') {
       const surname = data.get('surname').trim(), name = data.get('name').trim();
       if (!surname || !name) throw new Error('Укажите фамилию и имя.');
-      profile = {id:crypto.randomUUID(),surname,name,precinct:data.get('precinct'),day:today()};
+      const tik = data.get('tik'), precinct = data.get('precinct');
+      if (!tik || !config.precincts.some(p => p.id === precinct && p.tik === tik)) throw new Error('Выберите ТИК и УИК из его списка.');
+      profile = {id:crypto.randomUUID(),surname,name,tik,precinct,day:today()};
       store('profile',profile); store('previous',{surname,name}); draft = null; saveDraft();
       go(authNeeded?'login':'home');
       if (navigator.storage?.persist) void navigator.storage.persist();
@@ -228,7 +255,7 @@ async function boot() {
     catch { config=stored('config');connection(false); }
     if(!config) throw new Error('Для первого запуска подключитесь к интернету и обновите страницу.');
     profile=stored('profile'); draft=stored('draft');
-    if(profile?.day!==today()){profile=null;draft=null;store('profile',null);saveDraft();}
+    if(profile && (profile.day!==today() || !config.precincts.some(p => p.id === profile.precinct))){profile=null;draft=null;store('profile',null);saveDraft();}
     if(config.auth_required){
       try {await api('/api/session');store('authorized',true);}
       catch(e){authNeeded=e.status===401||!stored('authorized',false);}
