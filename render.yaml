@@ -6,7 +6,7 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: APP_ENV
-        value: production
+        value: development
       - key: TIMEZONE
         value: Europe/Moscow
       - key: DATABASE_PATH
