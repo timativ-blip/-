@@ -2,7 +2,7 @@ services:
   - type: web
     name: exit-poll
     runtime: docker
-    plan: starter
+    plan: free
     healthCheckPath: /api/health
     envVars:
       - key: APP_ENV
