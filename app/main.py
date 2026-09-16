@@ -8,7 +8,9 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
+from collections import Counter, defaultdict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +60,7 @@ class Settings:
         self.refusal_demographics = os.getenv("REFUSAL_DEMOGRAPHICS", "true").lower() == "true"
         self.spreadsheet = os.getenv("GOOGLE_SPREADSHEET_ID", "")
         self.sheet = os.getenv("GOOGLE_SHEET_NAME", "Анкеты")
+        self.dashboard_code = os.getenv("DASHBOARD_CODE", "")
         self.sms_url = os.getenv("SMS_GATEWAY_URL", "")
         self.sms_token = os.getenv("SMS_GATEWAY_TOKEN", "")
         self.sms_number = os.getenv("SMS_REQUEST_NUMBER", "")
@@ -131,6 +134,10 @@ class Survey(StrictModel):
 
 class Login(StrictModel):
     code: str = Field(max_length=200)
+
+
+class DashboardLogin(StrictModel):
+    code: str = Field(min_length=1, max_length=200)
 
 
 class SmsRequest(StrictModel):
@@ -221,6 +228,150 @@ def export_once(settings, transport=None, read_ids=None):
     return len(rows)
 
 
+def read_sheet(settings):
+    """Read the survey sheet. The service account is the only Sheets client."""
+    if not settings.spreadsheet:
+        raise RuntimeError("Google Sheets is not configured")
+    import google.auth
+    from google.auth.transport.requests import AuthorizedSession
+    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    sheet = "'" + settings.sheet.replace("'", "''") + "'"
+    url = (f"https://sheets.googleapis.com/v4/spreadsheets/"
+           f"{quote(settings.spreadsheet, safe='')}/values/{quote(f'{sheet}!A2:M', safe='')}")
+    with AuthorizedSession(credentials) as session:
+        response = session.get(url, timeout=20)
+        response.raise_for_status()
+        return response.json().get("values", [])
+
+
+def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None, requested_precinct=None):
+    """Build a small, privacy-conscious aggregate from rows in Google Sheets."""
+    rows = []
+    for source in values:
+        row = list(source[:13]) + [""] * max(0, 13 - len(source))
+        if not row[0] or row[0] == "ID анкеты":
+            continue
+        rows.append({
+            "id": str(row[0]), "created_at": str(row[1]), "day": str(row[2]),
+            "surname": str(row[3]), "name": str(row[4]), "precinct_id": str(row[5]),
+            "precinct": str(row[6]), "answer": str(row[7]), "gender": str(row[8]),
+            "age": str(row[9]), "shift_id": str(row[10]), "received_at": str(row[11]),
+            "tik": str(row[12]),
+        })
+
+    dates = sorted({row["day"] for row in rows if re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["day"])}, reverse=True)
+    selected_day = requested_day or (dates[0] if dates else datetime.now(settings.zone).date().isoformat())
+    filtered = [row for row in rows if row["day"] == selected_day]
+    if requested_tik:
+        filtered = [row for row in filtered if row["tik"] == requested_tik]
+    if requested_precinct:
+        filtered = [row for row in filtered if row["precinct_id"] == requested_precinct]
+
+    answers = Counter(row["answer"] for row in filtered)
+    genders = Counter(row["gender"] for row in filtered if row["gender"])
+    ages = Counter(row["age"] for row in filtered if row["age"])
+    shifts = {row["shift_id"] or f'{row["surname"]}|{row["name"]}' for row in filtered}
+    total = len(filtered)
+
+    catalog_tiks = sorted({p.get("tik", "") for p in settings.precincts if p.get("tik")})
+    tik_rows = defaultdict(list)
+    for row in [r for r in rows if r["day"] == selected_day]:
+        tik_rows[row["tik"]].append(row)
+    tik_stats = []
+    for tik in catalog_tiks:
+        items = tik_rows.get(tik, [])
+        tik_stats.append({
+            "tik": tik,
+            "total": len(items),
+            "refusals": sum(x["answer"] == "Отказался отвечать" for x in items),
+            "spoiled": sum(x["answer"] == "Испортил бюллетень" for x in items),
+            "uiks": len({x["precinct_id"] for x in items}),
+            "interviewers": len({x["shift_id"] or f'{x["surname"]}|{x["name"]}' for x in items}),
+        })
+    tik_stats.sort(key=lambda item: (-item["total"], item["tik"]))
+
+    uik_stats = []
+    if requested_tik:
+        by_uik = defaultdict(list)
+        for row in [r for r in rows if r["day"] == selected_day and r["tik"] == requested_tik]:
+            by_uik[row["precinct_id"]].append(row)
+        for precinct in [p for p in settings.precincts if p.get("tik") == requested_tik]:
+            items = by_uik.get(precinct["id"], [])
+            uik_stats.append({
+                "id": precinct["id"], "label": precinct["label"], "total": len(items),
+                "refusals": sum(x["answer"] == "Отказался отвечать" for x in items),
+                "spoiled": sum(x["answer"] == "Испортил бюллетень" for x in items),
+                "interviewers": len({x["shift_id"] or f'{x["surname"]}|{x["name"]}' for x in items}),
+            })
+        uik_stats.sort(key=lambda item: (-item["total"], item["label"]))
+        if requested_precinct:
+            uik_stats = [item for item in uik_stats if item["id"] == requested_precinct]
+
+    hours = Counter()
+    for row in filtered:
+        try:
+            moment = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            hours[moment.astimezone(settings.zone).hour] += 1
+        except (ValueError, TypeError):
+            pass
+
+    by_interviewer = defaultdict(list)
+    for row in filtered:
+        by_interviewer[row["shift_id"] or f'{row["surname"]}|{row["name"]}'].append(row)
+    interviewers = []
+    for items in by_interviewer.values():
+        first = items[0]
+        interviewers.append({
+            "name": (first["surname"] + " " + first["name"]).strip(),
+            "tik": first["tik"], "precinct": first["precinct"], "total": len(items),
+            "refusals": sum(x["answer"] == "Отказался отвечать" for x in items),
+        })
+    interviewers.sort(key=lambda item: (-item["total"], item["name"]))
+
+    def moment_key(row):
+        try:
+            return datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            return 0
+
+    recent = []
+    for row in sorted(filtered, key=moment_key, reverse=True)[:12]:
+        try:
+            moment = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            display_time = moment.astimezone(settings.zone).strftime("%H:%M")
+        except (ValueError, TypeError):
+            display_time = "—"
+        recent.append({"time": display_time, "tik": row["tik"], "precinct": row["precinct"], "answer": row["answer"]})
+
+    party_order = [label for party_id, label in PARTIES if party_id != "2"]
+    return {
+        "generated_at": datetime.now(settings.zone).isoformat(),
+        "selected_day": selected_day, "selected_tik": requested_tik or "",
+        "selected_precinct": requested_precinct or "", "available_dates": dates,
+        "filters": {"tiks": catalog_tiks,
+                    "precincts": ([{"id": p["id"], "label": p["label"]}
+                                   for p in settings.precincts if p.get("tik") == requested_tik]
+                                  if requested_tik else [])},
+        "summary": {"total": total, "refusals": answers["Отказался отвечать"],
+                    "spoiled": answers["Испортил бюллетень"], "interviewers": len(shifts),
+                    "uiks": len({row["precinct_id"] for row in filtered}),
+                    "tiks": len({row["tik"] for row in filtered if row["tik"]})},
+        "parties": [{"label": label, "count": answers[label],
+                     "percent": round(answers[label] * 100 / total, 1) if total else 0} for label in party_order],
+        "genders": [{"label": label, "count": genders[label],
+                     "percent": round(genders[label] * 100 / total, 1) if total else 0} for label in ("Мужской", "Женский")],
+        "ages": [{"label": label, "count": ages[label],
+                  "percent": round(ages[label] * 100 / total, 1) if total else 0} for label in AGES],
+        "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
+        "tik_stats": tik_stats, "uik_stats": uik_stats,
+        "interviewers": interviewers[:100], "recent": recent,
+    }
+
+
 def create_app(settings=None):
     settings = settings or Settings()
     initialize(settings)
@@ -247,6 +398,8 @@ def create_app(settings=None):
     app = FastAPI(title="Exit Poll", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
     failures = {}
+    dashboard_cache = {"at": 0.0, "values": []}
+    dashboard_lock = threading.Lock()
 
     def signed(value):
         return hmac.new(settings.secret.encode(), value.encode(), hashlib.sha256).hexdigest()
@@ -262,6 +415,27 @@ def create_app(settings=None):
         except (ValueError, TypeError):
             pass
         raise HTTPException(401, "Введите код доступа")
+
+    def dashboard_authorized(request: Request):
+        if not settings.dashboard_code:
+            raise HTTPException(503, "Задайте DASHBOARD_CODE в настройках Render")
+        token = request.cookies.get("exit_poll_dashboard_session", "")
+        try:
+            expiry, signature = token.split(".")
+            expected = signed("dashboard:" + expiry)
+            if int(expiry) >= time.time() and hmac.compare_digest(signature, expected):
+                return
+        except (ValueError, TypeError):
+            pass
+        raise HTTPException(401, "Введите код координатора")
+
+    def cached_sheet_values():
+        with dashboard_lock:
+            if time.monotonic() - dashboard_cache["at"] < 25:
+                return dashboard_cache["values"]
+            values = read_sheet(settings)
+            dashboard_cache.update(at=time.monotonic(), values=values)
+            return values
 
     @app.middleware("http")
     async def security(request, call_next):
@@ -316,6 +490,44 @@ def create_app(settings=None):
         response.set_cookie("exit_poll_session", expiry + "." + signed(expiry),
                             httponly=True, secure=settings.production, samesite="strict", max_age=30 * 86400)
         return {"ok": True}
+
+    @app.get("/api/dashboard/session", dependencies=[Depends(dashboard_authorized)])
+    def dashboard_session():
+        return {"ok": True}
+
+    @app.post("/api/dashboard/login")
+    def dashboard_login(body: DashboardLogin, request: Request, response: Response):
+        now = time.time()
+        key = "dashboard:" + (request.client.host if request.client else "unknown")
+        count, since = failures.get(key, (0, now))
+        if now - since >= 300:
+            count, since = 0, now
+        if count >= 10:
+            raise HTTPException(429, "Повторите через 5 минут")
+        if not settings.dashboard_code:
+            raise HTTPException(503, "Задайте DASHBOARD_CODE в настройках Render")
+        if not hmac.compare_digest(body.code.encode(), settings.dashboard_code.encode()):
+            failures[key] = (count + 1, since)
+            raise HTTPException(401, "Неверный код координатора")
+        failures.pop(key, None)
+        expiry = str(int(now + 12 * 3600))
+        response.set_cookie("exit_poll_dashboard_session", expiry + "." + signed("dashboard:" + expiry),
+                            httponly=True, secure=settings.production, samesite="strict", max_age=12 * 3600)
+        return {"ok": True}
+
+    @app.get("/api/dashboard/data", dependencies=[Depends(dashboard_authorized)])
+    def dashboard_data(day: str | None = None, tik: str | None = None, precinct: str | None = None):
+        if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            raise HTTPException(422, "Неверная дата")
+        if tik and tik not in {p.get("tik") for p in settings.precincts}:
+            raise HTTPException(422, "Неизвестный ТИК")
+        if precinct and precinct not in {p["id"] for p in settings.precincts}:
+            raise HTTPException(422, "Неизвестный УИК")
+        try:
+            return dashboard_snapshot(cached_sheet_values(), settings, day, tik, precinct)
+        except Exception as exc:
+            LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "Не удалось прочитать Google Таблицу")
 
     @app.post("/api/surveys", dependencies=[Depends(authorized)])
     def submit(body: Survey):
@@ -375,6 +587,10 @@ def create_app(settings=None):
     @app.get("/")
     def index():
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/dashboard")
+    def dashboard():
+        return FileResponse(STATIC / "dashboard.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/sw.js")
     def worker():
