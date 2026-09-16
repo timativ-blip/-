@@ -1,1 +1,19 @@
-{"name": "Экзитпол — приложение интервьюера", "short_name": "Экзитпол", "lang": "ru", "start_url": "/", "display": "standalone", "background_color": "#faf9f5", "theme_color": "#e5eddf", "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}]}
+{
+  "id": "/",
+  "name": "Экзитполы — приложение интервьюера",
+  "short_name": "Экзитполы",
+  "description": "Офлайн-анкеты для опроса после голосования",
+  "lang": "ru",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#faf9f5",
+  "theme_color": "#e5eddf",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
+  ]
+}

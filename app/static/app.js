@@ -1,8 +1,21 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let config, db, profile, draft, screen = 'profile', syncing = false, submitting = false, connected = false, authNeeded = false, lastSmsAttempt = 0;
+let config, db, profile, draft, screen = 'profile', syncing = false, submitting = false, connected = false, authNeeded = false;
+let installPrompt = null;
+let offlineReadiness = {state:'checking', detail:'Проверяем сохранённые файлы приложения…'};
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel('exit-poll') : null;
+
+window.addEventListener('beforeinstallprompt', event => {
+  event.preventDefault();
+  installPrompt = event;
+  renderReadiness();
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  store('installed', true);
+  renderReadiness();
+});
 
 function stored(key, fallback = null) {
   try { return JSON.parse(localStorage.getItem('ep-' + key)) ?? fallback; } catch { return fallback; }
@@ -63,8 +76,7 @@ function connection(ok, slow = false) {
   $('#connection').className = 'connection' + (!ok || slow ? ' offline' : '');
   const notice = $('#notice');
   notice.hidden = ok && !slow;
-  if (!notice.hidden) notice.innerHTML = `Анкеты сохраняются на телефоне. Откройте приложение при восстановлении связи — они отправятся автоматически.<button data-action="sms">Помощь и SMS</button>`;
-  if (!ok || slow) maybeRequestSms();
+  if (!notice.hidden) notice.innerHTML = `<strong>${ok ? 'Слабая связь' : 'Нет подключения'}</strong><br>Анкеты сохраняются на телефоне. Их можно отправить по SMS или автоматически после восстановления связи.<button data-action="sms">Открыть очередь и SMS</button>`;
 }
 async function syncUnlocked() {
   if (syncing) return;
@@ -110,6 +122,8 @@ async function updateStats() {
   $('#sync-status').textContent = authNeeded ? 'Для отправки нужен код доступа' : rejected ? `Требуют внимания: ${rejected}. В очереди: ${pending}` : pending ? `Ожидают отправки: ${pending}` : 'Все анкеты переданы на сервер';
   $('#auth-link').hidden = !authNeeded;
   $('#export-link').hidden = !rejected && !pending;
+  await renderPendingSurveys('offline-queue', rows.filter(x => !x.received && !x.rejected));
+  renderReadiness();
 }
 function steps(n) { return `<div class="steps" aria-label="Шаг ${n} из 3">${[1,2,3].map(i=>`<span class="${i<=n?'done':''}"></span>`).join('')}</div><div class="section-kicker">АНКЕТА · ШАГ ${n} ИЗ 3</div>`; }
 function card(content) { return `<section class="card">${content}<p id="error" class="error" role="alert"></p></section>`; }
@@ -129,6 +143,118 @@ function refreshPrecincts() {
   if ([...select.options].some(option => option.value === selected)) select.value = selected;
 }
 
+function standaloneMode() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+function renderReadiness() {
+  const box = $('#offline-readiness');
+  if (!box) return;
+  const ready = offlineReadiness.state === 'ready';
+  const checking = offlineReadiness.state === 'checking';
+  const installed = standaloneMode() || stored('installed', false);
+  const installControl = installPrompt
+    ? '<button class="secondary compact" data-action="install">Добавить на главный экран</button>'
+    : (!installed && /iPhone|iPad|iPod/.test(navigator.userAgent)
+      ? '<p class="hint install-hint">На iPhone нажмите «Поделиться» → «На экран Домой».</p>'
+      : '');
+  box.className = `readiness ${ready ? 'ready' : checking ? 'checking' : 'not-ready'}`;
+  box.innerHTML = `<div class="readiness-title"><span>${ready ? '✓' : checking ? '…' : '!'}</span><strong>${ready ? 'Устройство готово к офлайн-работе' : checking ? 'Проверяем офлайн-режим' : 'Офлайн-режим ещё не готов'}</strong></div><p>${escapeHTML(offlineReadiness.detail)}</p>${ready ? '<button class="text-button" data-action="check-offline">Проверить снова</button>' : '<button class="secondary compact" data-action="check-offline">Подготовить и проверить</button>'}${installControl}`;
+}
+async function checkOfflineReadiness() {
+  offlineReadiness = {state:'checking', detail:'Сохраняем интерфейс и справочники на телефоне…'};
+  renderReadiness();
+  try {
+    if (!('serviceWorker' in navigator)) throw new Error('Этот браузер не поддерживает офлайн-приложения.');
+    if (!window.isSecureContext && location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') throw new Error('Для офлайн-режима откройте приложение по защищённой HTTPS-ссылке.');
+    if (!stored('config')) throw new Error('Сначала дождитесь загрузки ТИК и УИК при подключённом интернете.');
+    const registration = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    const worker = registration.active || registration.waiting || registration.installing;
+    if (!worker) throw new Error('Офлайн-модуль ещё устанавливается. Нажмите «Проверить снова» через несколько секунд.');
+    const result = await Promise.race([
+      new Promise((resolve, reject) => {
+        const message = new MessageChannel();
+        message.port1.onmessage = event => resolve(event.data);
+        message.port1.onmessageerror = () => reject(new Error('Не удалось проверить локальную копию.'));
+        worker.postMessage({type:'CHECK_OFFLINE_READY'}, [message.port2]);
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Проверка заняла слишком много времени. Обновите страницу при интернете.')), 8000))
+    ]);
+    if (!result?.ready) throw new Error('Не все файлы сохранились. Оставьте приложение открытым при интернете и повторите проверку.');
+    if (navigator.storage?.persist) void navigator.storage.persist();
+    store('offline-ready', {version:result.version, checked_at:new Date().toISOString()});
+    offlineReadiness = {state:'ready', detail:'Форма, оформление и список участков сохранены на этом телефоне. Можно отключить интернет и продолжить опрос.'};
+  } catch (e) {
+    offlineReadiness = {state:'not-ready', detail:friendlyError(e)};
+  }
+  renderReadiness();
+}
+async function installApplication() {
+  if (!installPrompt) return;
+  const prompt = installPrompt;
+  installPrompt = null;
+  await prompt.prompt();
+  await prompt.userChoice;
+  renderReadiness();
+}
+function compactTimestamp(value) {
+  const parts = new Intl.DateTimeFormat('en-GB', {timeZone:config.timezone, year:'2-digit',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date(value));
+  const part = type => parts.find(x => x.type === type)?.value || '00';
+  return `${part('year')}${part('month')}${part('day')}${part('hour')}${part('minute')}`;
+}
+function smsCode(item) {
+  const uik = item.profile.precinct.match(/(\d+)(?!.*\d)/)?.[1] || item.profile.precinct.replace(/\s+/g, '');
+  const party = item.party === 'spoiled' ? '12' : item.party === 'refused' ? '13' : item.party;
+  const gender = item.gender === 'male' ? '1' : '2';
+  const age = String(config.ages.indexOf(item.age) + 1);
+  const surveyId = item.id.replace(/-/g, '');
+  const shiftId = item.profile.id.replace(/-/g, '').slice(0, 8);
+  return `EP1 ${uik} ${party} ${gender} ${age} ${compactTimestamp(item.created_at)} ${surveyId} ${shiftId}`;
+}
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(value);
+  const field = document.createElement('textarea');
+  field.value = value; field.style.position = 'fixed'; field.style.opacity = '0';
+  document.body.append(field); field.select(); document.execCommand('copy'); field.remove();
+}
+async function copySurveySms(id) {
+  const item = (await allSurveys()).find(row => row.id === id);
+  if (!item) throw new Error('Анкета не найдена на устройстве.');
+  await copyText(smsCode(item));
+  toast('SMS-код анкеты скопирован. Вставьте его в сообщение координатору.');
+}
+async function openSurveySms(id) {
+  const item = (await allSurveys()).find(row => row.id === id);
+  if (!item) throw new Error('Анкета не найдена на устройстве.');
+  const code = smsCode(item);
+  const number = String(config.sms_request_number || '').trim();
+  if (!/^\+[1-9]\d{7,14}$/.test(number)) {
+    await copyText(code);
+    toast('Служебный SMS-номер ещё не настроен. Код скопирован — отправьте его координатору вручную.');
+    return;
+  }
+  const separator = /iPhone|iPad|iPod/.test(navigator.userAgent) ? '&body=' : '?body=';
+  window.location.href = `sms:${number}${separator}${encodeURIComponent(code)}`;
+}
+async function renderPendingSurveys(containerId, providedRows) {
+  const box = $('#' + containerId);
+  if (!box) return;
+  const rows = providedRows || (await allSurveys()).filter(item => !item.received && !item.rejected);
+  if (!rows.length) {
+    if (containerId === 'offline-queue') { box.hidden = true; box.innerHTML = ''; }
+    else box.innerHTML = '<div class="status-note success-note">Все сохранённые анкеты отправлены на сервер.</div>';
+    return;
+  }
+  box.hidden = false;
+  const hasNumber = /^\+[1-9]\d{7,14}$/.test(String(config.sms_request_number || '').trim());
+  const items = rows.sort((a,b) => new Date(a.created_at) - new Date(b.created_at)).map(item => {
+    const answer = config.parties.find(p => p.id === item.party)?.label || item.party;
+    const time = new Intl.DateTimeFormat('ru', {timeZone:config.timezone,hour:'2-digit',minute:'2-digit'}).format(new Date(item.created_at));
+    return `<div class="queue-item"><div><strong>${escapeHTML(time)} · ${escapeHTML(answer)}</strong><small>${escapeHTML(item.profile.tik || '')} · ${escapeHTML(item.profile.precinct.replace('mo-uik-', 'УИК № '))}</small></div><div class="queue-actions"><button class="secondary compact" data-sms-id="${escapeHTML(item.id)}">${hasNumber ? 'Отправить через SMS' : 'Скопировать SMS-код'}</button><button class="text-button" data-copy-sms-id="${escapeHTML(item.id)}">Копировать</button></div></div>`;
+  }).join('');
+  box.innerHTML = `<div class="queue-head"><div><div class="section-kicker">${connected ? 'ОЧЕРЕДЬ ОТПРАВКИ' : 'НЕТ ПОДКЛЮЧЕНИЯ'}</div><h3>${rows.length} ${rows.length === 1 ? 'анкета сохранена' : 'анкеты сохранены'} на устройстве</h3></div><span class="queue-count">${rows.length}</span></div><p>${connected ? 'Идёт повторная отправка на сервер.' : 'Отправьте каждую анкету по SMS или дождитесь интернета — приложение повторит отправку автоматически.'}</p>${items}<button class="secondary compact retry-button" data-action="sync">Попробовать снова</button>`;
+}
+
 function render() {
   $('#toast').hidden = true;
   if (screen === 'profile') {
@@ -138,16 +264,18 @@ function render() {
       <label class="field" for="tik">Ваш ТИК</label><select name="tik" id="tik" required><option value="">Выберите территориальную комиссию</option>${tikList().map(tik=>`<option value="${escapeHTML(tik)}">${escapeHTML(tik)}</option>`).join('')}</select>
       <label class="field" for="precinct-search">Найти УИК по номеру</label><input id="precinct-search" type="search" inputmode="numeric" placeholder="Например, 1259" autocomplete="off" disabled><label class="field" for="precinct">Ваш УИК</label><select name="precinct" id="precinct" required disabled><option value="">Сначала выберите ТИК</option></select><p class="hint">Показаны только УИК выбранной территориальной комиссии.</p>
       
-      <button class="primary action" type="submit">Сохранить и начать <span>→</span></button><p class="hint">Имя относится к интервьюеру. Личные данные респондента не запрашиваются.</p></form>`);
+      <button class="primary action" type="submit">Сохранить и начать <span>→</span></button><p class="hint">Имя относится к интервьюеру. Личные данные респондента не запрашиваются.</p></form><hr class="divider"><div id="offline-readiness"></div>`);
+    renderReadiness();
   } else if (screen === 'login') {
     $('#app').innerHTML = card(`<div class="section-kicker">ДОСТУП К ИССЛЕДОВАНИЮ</div><h2>Код вашей команды</h2><p class="muted">Код выдаёт координатор. Он защищает сбор анкет от посторонних отправок.</p><form id="login-form"><label for="code" class="field">Код доступа</label><input id="code" name="code" type="password" autocomplete="current-password" required><button class="primary action">Продолжить →</button></form>${profile?'<button class="text-button" data-action="home">Продолжить сбор офлайн</button>':''}`);
   } else if (screen === 'home') {
     const initials = (profile.name[0] + profile.surname[0]).toUpperCase();
     $('#app').innerHTML = card(`<div class="shift"><div class="badge">${escapeHTML(initials)}</div><span class="tag">${escapeHTML(dateLabel())}</span></div><div class="section-kicker">СМЕНА ОТКРЫТА</div><h2>${escapeHTML(profile.name)}, вы на месте.</h2><p class="summary-line">${escapeHTML(profile.surname)} ${escapeHTML(profile.name)}<br>${escapeHTML(precinctLabel())}</p>
       <div class="stats"><div class="stat"><strong id="completed">—</strong><span>анкет сегодня</span></div><div class="stat"><strong id="refused">—</strong><span>отказов сегодня</span></div></div><button class="primary" data-action="new">＋ Новая анкета</button>
-      <div class="sync-row"><span id="sync-status">Проверяем отправку…</span><button class="text-button" data-action="sync">Обновить</button></div><button id="auth-link" class="secondary" data-action="login" hidden>Ввести код доступа</button><button id="export-link" class="text-button" data-action="export" hidden>Скачать резервную копию</button>
+      <div class="sync-row"><span id="sync-status">Проверяем отправку…</span><button class="text-button" data-action="sync">Обновить</button></div><button id="auth-link" class="secondary" data-action="login" hidden>Ввести код доступа</button><button id="export-link" class="text-button" data-action="export" hidden>Скачать резервную копию</button><div id="offline-queue" class="offline-queue" hidden></div>
       ${!config.sheets_configured?'<div class="status-note">Google Таблицы ещё не подключены. Анкеты будут сохранены на сервере до подключения.</div>':'<p class="hint">Сервер передаёт анкеты в Google Таблицы отдельной очередью. При сбое передача повторяется автоматически.</p>'}
-      <hr class="divider"><div class="title-row"><button class="text-button" data-action="sms">Связь и SMS</button><button class="text-button" data-action="change">Изменить данные смены</button></div><p class="hint">Счётчики учитывают анкеты этого интервьюера в этом браузере за сегодня, включая ещё не отправленные.</p>`);
+      <hr class="divider"><div id="offline-readiness"></div><hr class="divider"><div class="title-row"><button class="text-button" data-action="sms">Офлайн и SMS</button><button class="text-button" data-action="change">Изменить данные смены</button></div><p class="hint">Счётчики учитывают анкеты этого интервьюера в этом браузере за сегодня, включая ещё не отправленные.</p>`);
+    renderReadiness();
     updateStats().catch(e=>error(friendlyError(e)));
   } else if (screen === 'party') {
     $('#app').innerHTML = card(`${back('home','К смене')}${steps(1)}<h2>Выбор респондента</h2><p class="script">Добрый день, я провожу анонимный опрос сразу после голосования. Подскажите, пожалуйста, за какую партию вы только что проголосовали?</p><div class="parties">${config.parties.map(p=>`<button class="option ${p.id==='refused'?'refusal':p.id==='spoiled'?'spoiled':''}" data-party="${escapeHTML(p.id)}" ${p.disabled?'disabled aria-disabled="true"':''}>${/^\d+$/.test(p.id)?`<span class="num">${p.id}</span>`:''}<span>${escapeHTML(p.label)}</span>${p.disabled?'<small>недоступно</small>':''}</button>`).join('')}</div>`);
@@ -156,11 +284,11 @@ function render() {
   } else if (screen === 'review') {
     $('#app').innerHTML = card(`${back(draft.party==='refused'&&!config.refusal_demographics?'party':'demographics')}${steps(3)}<h2>Всё верно?</h2><p class="muted">Проверьте ответы перед отправкой.</p><dl class="review"><div><dt>Партия / ответ</dt><dd class="${draft.party==='refused'?'red':''}">${escapeHTML(config.parties.find(p=>p.id===draft.party).label)}</dd></div><div><dt>Пол респондента</dt><dd>${draft.gender==='male'?'Мужской':draft.gender==='female'?'Женский':'Не указан'}</dd></div><div><dt>Возраст респондента</dt><dd>${escapeHTML(draft.age||'Не указан')}</dd></div></dl><p class="hint">${escapeHTML(precinctLabel())}</p><button class="primary action" data-action="submit">Отправить анкету <span>✓</span></button><p class="hint">При отсутствии связи анкета сохранится на телефоне и будет отправлена при следующем подключении.</p>`);
   } else if (screen === 'sms') {
-    const preferences = stored('sms', {});
-    const number = config.sms_request_number;
-    $('#app').innerHTML = card(`${back(profile?'home':'profile')}<div class="section-kicker">РАБОТА ПРИ СЛАБОЙ СВЯЗИ</div><h2>Продолжайте опрос</h2><p class="muted">Открытые ранее анкеты доступны без интернета. После возвращения связи оставьте приложение открытым для отправки.</p><div class="status-note">SMS содержит текст опроса. Заполнять ответы и отправлять их нужно в приложении. Ответы на SMS пока не принимаются.</div>
-      ${config.sms_configured?`<form id="sms-form"><label class="field" for="phone">Телефон интервьюера для SMS</label><input id="phone" name="phone" type="tel" placeholder="+79001234567" pattern="[+][1-9][0-9]{7,14}" value="${escapeHTML(preferences.phone||'')}" required><label class="check"><input name="enabled" type="checkbox" ${preferences.enabled?'checked':''}><span>Присылать SMS при слабой связи. Мой номер будет передан подключённому SMS-сервису.</span></label><button class="primary action">Сохранить настройки SMS</button></form><button class="text-button" data-action="request-sms">Запросить SMS сейчас</button>`:'<p class="hint">SMS-сервис ещё не подключён координатором.</p>'}
-      <p class="hint">Без интернета автоматический запрос SMS не дойдёт до сервера. Если работает сотовая сеть, можно отправить запрос на служебный номер, когда координатор подключит приём SMS.</p>${/^\+[1-9]\d{7,14}$/.test(number)?`<a href="sms:${escapeHTML(number)}?body=EXITPOLL" class="secondary">Открыть SMS с запросом</a>`:''}<hr class="divider"><button class="secondary" data-action="export">Скачать резервную копию анкет</button><p class="hint">Не очищайте данные браузера, пока все анкеты не переданы на сервер.</p>`);
+    const number = String(config.sms_request_number || '').trim();
+    $('#app').innerHTML = card(`${back(profile?'home':'profile')}<div class="section-kicker">АВАРИЙНАЯ ОТПРАВКА</div><h2>Офлайн и SMS</h2><p class="muted">Анкеты хранятся на этом телефоне. Когда интернет вернётся, приложение отправит их на сервер автоматически.</p><div class="status-note">Если мобильная сеть работает, кнопка ниже подготовит короткое SMS с данными анкеты. Текст уже заполнен — останется нажать «Отправить».</div>
+      <p class="sms-number">${/^\+[1-9]\d{7,14}$/.test(number) ? `Служебный номер: <strong>${escapeHTML(number)}</strong>` : '<strong>Служебный номер пока не настроен.</strong> Код можно скопировать и отправить координатору вручную.'}</p><div id="sms-queue" class="offline-queue sms-queue"></div><hr class="divider"><div id="offline-readiness"></div><hr class="divider"><button class="secondary" data-action="export">Скачать резервную копию анкет</button><p class="hint">Не очищайте данные браузера, пока все анкеты не переданы на сервер.</p>`);
+    renderReadiness();
+    renderPendingSurveys('sms-queue').catch(e=>error(friendlyError(e)));
   }
 }
 function precinctOptions(query, tik) {
@@ -179,7 +307,8 @@ async function submitSurvey() {
     draft.created_at ||= new Date().toISOString(); saveDraft();
     const body = {...draft, profile};
     await putSurvey({...body, received:false});
-    draft = null; saveDraft(); go('home'); toast('Анкета сохранена. Можно начинать следующий опрос.');
+    draft = null; saveDraft(); go('home');
+    toast(connected ? 'Анкета сохранена. Можно начинать следующий опрос.' : 'Нет подключения. Анкета сохранена на устройстве — отправьте её через SMS или дождитесь интернета.');
     void sync();
   } catch (e) { error('Не удалось сохранить анкету на телефоне. Освободите место и повторите. Ответы остаются на экране.'); if (button) button.disabled = false; }
   finally { submitting = false; }
@@ -190,15 +319,6 @@ async function exportBackup() {
   a.href = url; a.download = `exit-poll-backup-${today()}.json`; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
   toast('Резервная копия содержит ответы и имя интервьюера. Передайте её только координатору.');
 }
-async function requestSms(automatic=false) {
-  const prefs = stored('sms', {});
-  if (!prefs.phone || !config?.sms_configured) { if(!automatic) error('Сначала сохраните телефон в настройках SMS.'); return; }
-  if (Date.now() - lastSmsAttempt < 15*60*1000) { if(!automatic) error('Повторный запрос доступен через 15 минут.'); return; }
-  lastSmsAttempt = Date.now();
-  try { await api('/api/sms/request',{phone:prefs.phone},15000); toast('Запрос SMS принят сервисом.'); }
-  catch(e) { if(!automatic) error(e.status?e.message:'Нет связи с сервером. Продолжайте заполнять анкеты офлайн.'); }
-}
-function maybeRequestSms() { if (stored('sms',{}).enabled) void requestSms(true); }
 document.addEventListener('input', event => {
   if (event.target.id === 'precinct-search') refreshPrecincts();
 });
@@ -224,15 +344,15 @@ document.addEventListener('submit', async event => {
       if (navigator.storage?.persist) void navigator.storage.persist();
     } else if (form.id === 'login-form') {
       await api('/api/login',{code:data.get('code')}); authNeeded=false; store('authorized',true); go(profile?'home':'profile'); void sync();
-    } else if (form.id === 'sms-form') {
-      store('sms',{phone:data.get('phone'),enabled:data.get('enabled')==='on'}); toast('Настройки SMS сохранены.');
     }
   } catch(e) { error(friendlyError(e)); }
 });
 document.addEventListener('click', async event => {
   const button = event.target.closest('button'); if (!button || button.disabled) return;
   try {
-    if (button.dataset.party) { if(!currentDay())return; draft.party=button.dataset.party; saveDraft(); go(draft.party==='refused'&&!config.refusal_demographics?'review':'demographics'); }
+    if (button.dataset.smsId) { await openSurveySms(button.dataset.smsId); }
+    else if (button.dataset.copySmsId) { await copySurveySms(button.dataset.copySmsId); }
+    else if (button.dataset.party) { if(!currentDay())return; draft.party=button.dataset.party; saveDraft(); go(draft.party==='refused'&&!config.refusal_demographics?'review':'demographics'); }
     else if (button.dataset.gender) { draft.gender=button.dataset.gender; saveDraft(); render(); }
     else if (button.dataset.age) { draft.age=button.dataset.age; saveDraft(); render(); }
     else switch(button.dataset.action) {
@@ -241,7 +361,8 @@ document.addEventListener('click', async event => {
       case 'sync': await sync(); break;
       case 'change': go('profile'); break;
       case 'export': await exportBackup(); break;
-      case 'request-sms': await requestSms(); break;
+      case 'check-offline': await checkOfflineReadiness(); break;
+      case 'install': await installApplication(); break;
       default: if(button.dataset.action) go(button.dataset.action);
     }
   } catch(e) { error(friendlyError(e)); }
@@ -263,11 +384,18 @@ async function boot() {
     screen=authNeeded?'login':profile?(draft?.party?'review':draft?'party':'home'):'profile';
     if(screen==='review'&&(!draft.gender||!draft.age)) screen='demographics';
     render();
-    if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>toast('Офлайн-загрузка не включилась. Оставьте приложение открытым и проверьте HTTPS.'));
+    if('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('controllerchange',()=>void checkOfflineReadiness());
+      navigator.serviceWorker.register('/sw.js')
+        .then(()=>checkOfflineReadiness())
+        .catch(()=>{offlineReadiness={state:'not-ready',detail:'Офлайн-загрузка не включилась. Оставьте приложение открытым при интернете и проверьте HTTPS.'};renderReadiness();});
+    } else {
+      offlineReadiness={state:'not-ready',detail:'Этот браузер не поддерживает офлайн-приложения.'};renderReadiness();
+    }
     void sync();
     setInterval(()=>{if(profile&&!currentDay())return;void sync();},30000);
     window.addEventListener('online',()=>void sync());
-    window.addEventListener('offline',()=>connection(false));
+    window.addEventListener('offline',()=>{connection(false);if(screen==='home')void updateStats();});
     window.addEventListener('pageshow',()=>{if(profile)currentDay();});
     document.addEventListener('visibilitychange',()=>{if(!document.hidden){if(profile)currentDay();void sync();}});
     channel?.addEventListener('message',()=>{if(screen==='home')void updateStats();});
