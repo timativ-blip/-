@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+  <title>Экзитпол · Дашборд</title>
+</head>
+<body>
+  <main id="login-view" class="login-wrap">
+    <section class="login-card">
+      <div class="mark">Э</div>
+      <p class="kicker">ПУЛЬТ КООРДИНАТОРА</p>
+      <h1>Данные экзитпола</h1>
+      <p>Сводка обновляется по данным Google Таблицы. Введите отдельный код координатора.</p>
+      <form id="login-form">
+        <label for="code">Код доступа</label>
+        <input id="code" name="code" type="password" autocomplete="current-password" required autofocus>
+        <button type="submit">Открыть дашборд</button>
+        <p id="login-error" class="error" role="alert"></p>
+      </form>
+    </section>
+  </main>
+
+  <div id="dashboard" hidden>
+    <header class="topbar">
+      <div class="identity">
+        <div class="mark small">Э</div>
+        <div><strong>Экзитпол</strong><span>Московская область · аналитика</span></div>
+      </div>
+      <div id="live-status" class="live"><i></i><span>Обновляем данные</span></div>
+    </header>
+
+    <main class="page">
+      <section class="heading">
+        <div><p class="kicker">ОПЕРАТИВНАЯ СВОДКА</p><h1>Ход опроса</h1><p id="period-label" class="subtle"></p></div>
+        <button id="refresh" class="refresh" type="button">Обновить</button>
+      </section>
+
+      <section class="filters" aria-label="Фильтры дашборда">
+        <label>Дата<select id="day"></select></label>
+        <label>ТИК<select id="tik"><option value="">Все ТИК</option></select></label>
+        <label>УИК<select id="precinct"><option value="">Все УИК</option></select></label>
+        <div class="update-note">Автообновление: 30 сек.<br><span id="updated-at">—</span></div>
+      </section>
+
+      <div id="data-error" class="alert" hidden></div>
+
+      <section id="summary" class="summary" aria-label="Ключевые показатели"></section>
+
+      <section class="grid two">
+        <article class="panel party-panel"><header><div><p class="kicker">РЕЗУЛЬТАТЫ</p><h2>Ответы по партиям</h2></div><span class="panel-note">доля от всех анкет</span></header><div id="party-chart" class="bars"></div></article>
+        <article class="panel"><header><div><p class="kicker">ПОРТРЕТ</p><h2>Пол и возраст</h2></div></header><h3>Пол</h3><div id="gender-chart" class="bars compact-bars"></div><h3>Возраст</h3><div id="age-chart" class="bars compact-bars"></div></article>
+      </section>
+
+      <section class="panel timeline-panel"><header><div><p class="kicker">ДИНАМИКА</p><h2>Анкеты по времени</h2></div><span class="panel-note">по времени заполнения</span></header><div id="hours-chart" class="hour-chart"></div></section>
+
+      <section class="panel table-panel"><header><div><p class="kicker">ГЕОГРАФИЯ</p><h2 id="geo-title">Контроль по ТИК</h2></div><span class="panel-note">Нажмите строку, чтобы открыть участки</span></header><div class="table-scroll"><table><thead><tr><th>Территория</th><th>Анкет</th><th>Отказов</th><th>Испорчено</th><th>УИК с данными</th><th>Интервьюеров</th><th>Доля</th></tr></thead><tbody id="geo-table"></tbody></table></div></section>
+
+      <section class="grid two lower">
+        <article class="panel table-panel"><header><div><p class="kicker">КОМАНДА</p><h2>Работа интервьюеров</h2></div></header><div class="table-scroll"><table><thead><tr><th>Интервьюер</th><th>Участок</th><th>Анкет</th><th>Отказов</th></tr></thead><tbody id="interviewers"></tbody></table></div></article>
+        <article class="panel"><header><div><p class="kicker">ПОТОК</p><h2>Последние анкеты</h2></div></header><div id="recent" class="recent"></div></article>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

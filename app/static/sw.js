@@ -1,4 +1,4 @@
-const CACHE = 'exit-poll-v6-offline';
+const CACHE = 'exit-poll-v7-offline';
 const FILES = [
   '/',
   '/static/app.js',
@@ -23,6 +23,13 @@ self.addEventListener('activate', event => event.waitUntil(
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
+
+  // The coordinator dashboard contains live confidential data and is never
+  // cached or used as the offline fallback for the interviewer application.
+  if (event.request.mode === 'navigate' && url.pathname === '/dashboard') {
+    event.respondWith(fetch(event.request));
+    return;
+  }
 
   if (event.request.mode === 'navigate') {
     event.respondWith((async () => {
