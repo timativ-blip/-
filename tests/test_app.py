@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import Settings, connect, create_app, export_once
+from app.main import Settings, connect, create_app, dashboard_snapshot, export_once
 
 
 @pytest.fixture
@@ -165,6 +165,41 @@ def test_static_app_is_available(client):
     config = client.get("/api/config").json()
     assert config["refusal_demographics"] is True
     assert [x["id"] for x in config["parties"] if x["disabled"]] == ["2"]
+    assert client.get("/dashboard").status_code == 200
+
+
+def test_dashboard_aggregates_sheet_rows(settings):
+    tik = settings.precincts[0]["tik"]
+    precinct = settings.precincts[0]
+    values = [
+        ["one", "2026-09-16T08:30:00+00:00", "2026-09-16", "Иванова", "Анна",
+         precinct["id"], precinct["label"], "Новые люди", "Женский", "25–34", "shift-1", "", tik],
+        ["two", "2026-09-16T09:00:00+00:00", "2026-09-16", "Иванова", "Анна",
+         precinct["id"], precinct["label"], "Отказался отвечать", "Мужской", "45–60", "shift-1", "", tik],
+    ]
+    result = dashboard_snapshot(values, settings)
+    assert result["selected_day"] == "2026-09-16"
+    assert result["summary"] == {"total": 2, "refusals": 1, "spoiled": 0,
+                                  "interviewers": 1, "uiks": 1, "tiks": 1}
+    assert next(x for x in result["parties"] if x["label"] == "Новые люди")["count"] == 1
+    assert result["interviewers"][0]["total"] == 2
+
+    precinct_result = dashboard_snapshot(values, settings, requested_tik=tik,
+                                         requested_precinct=precinct["id"])
+    assert [item["id"] for item in precinct_result["uik_stats"]] == [precinct["id"]]
+    assert precinct_result["uik_stats"][0]["spoiled"] == 0
+
+
+def test_dashboard_uses_separate_code(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.access_code = "interviewer-code"
+    settings.spreadsheet = "test-sheet"
+    monkeypatch.setattr("app.main.read_sheet", lambda _: [])
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/dashboard/data").status_code == 401
+        assert client.post("/api/dashboard/login", json={"code":"interviewer-code"}).status_code == 401
+        assert client.post("/api/dashboard/login", json={"code":"coordinator-secret"}).status_code == 200
+        assert client.get("/api/dashboard/data").status_code == 200
 
 
 def test_production_rejects_missing_credentials(monkeypatch):
