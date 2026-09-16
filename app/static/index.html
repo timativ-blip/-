@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0ad2ca">
+  <meta name="theme-color" content="#e5eddf">
   <meta name="description" content="Рабочее приложение интервьюера Экзитпол">
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
@@ -12,22 +12,16 @@
   <title>Экзитпол · Рабочая смена</title>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/" aria-label="Экзитпол, начало"><img class="party-logo" src="/static/party-logo.png" alt="Партия Новые люди" width="116" height="78"><span class="brand-copy">Экзитпол<small>ПРИЛОЖЕНИЕ ИНТЕРВЬЮЕРА</small></span></a><span id="connection" class="connection">Проверяем связь</span></header>
+  <header class="topbar"><a class="brand" href="/" aria-label="Экзитпол, начало"><img class="app-symbol" src="/static/icon.svg" alt="" width="42" height="42"><span class="brand-copy">Экзитпол<small>ПРОСТРАНСТВО ДЛЯ ОПРОСА</small></span></a><span id="connection" class="connection">Проверяем связь</span></header>
   <div class="layout">
     <aside class="intro">
       <div class="eyebrow"><span></span> ОПРОС ПОСЛЕ ГОЛОСОВАНИЯ</div>
-      <h1>Слушаем.<br>Фиксируем.<br><em>Изучаем.</em></h1>
-      <p>Ответы людей — в центре исследования.<br>Записывайте их внимательно и анонимно.</p>
-      <div class="research-art" aria-label="Экзитпол: диалог и анонимные ответы">
-        <span class="art-orbit" aria-hidden="true"></span>
-        <div class="art-note"><span class="art-caption">ПОЛЕВАЯ РАБОТА</span><strong>Один разговор.<br>Одна анкета.</strong><span class="art-rule"></span><span class="art-rule short"></span></div>
-        <div class="art-party"><img src="/static/party-logo.png" alt="Партия Новые люди" width="160" height="105"></div>
-        <span class="art-check" aria-hidden="true">✓</span>
-        <span class="art-label">ДИАЛОГ → ДАННЫЕ</span>
-      </div>
-      <div class="intro-foot"><span class="tiny-dot"></span> Без имени респондента. С уважением к каждому.</div>
+      <h1>Внимание к людям.<br><em>Точность в ответах.</em></h1>
+      <p>Короткий разговор помогает увидеть общую картину. <br>Мы бережно записываем ответы, не спрашивая имя респондента.</p>
+      <img class="research-art" src="/static/survey-illustration.svg" alt="Два облачка диалога и карточка с ответами" width="480" height="300">
+      <div class="field-guide"><div><span>01</span><p><strong>Пригласите к разговору</strong>Представьтесь и уточните, готов ли человек ответить.</p></div><div><span>02</span><p><strong>Запишите ответ</strong>Выберите вариант, пол и возрастную группу.</p></div><div><span>03</span><p><strong>Проверьте и сохраните</strong>Отказ тоже важен — отметьте его в анкете.</p></div></div>
     </aside>
-    <main><div id="notice" class="notice" role="status" hidden></div><div id="app"><p class="muted">Загружаем приложение…</p></div><div id="toast" role="status" class="toast" hidden></div><footer>ЭКЗИТПОЛ <span>Исследование начинается с диалога.</span></footer></main>
+    <main><div id="notice" class="notice" role="status" hidden></div><div id="app"><p class="muted">Загружаем приложение…</p></div><div id="toast" role="status" class="toast" hidden></div><footer>ЭКЗИТПОЛ <span>Внимательно. Спокойно. Без лишних данных.</span></footer></main>
   </div>
   <noscript>Для заполнения анкет включите JavaScript в браузере.</noscript>
 </body>
