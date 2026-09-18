@@ -42,6 +42,7 @@
 
       <section class="filters" aria-label="Фильтры дашборда">
         <label>Дата<select id="day"></select></label>
+        <label>Округ<select id="okrug"><option value="">Все округа</option></select></label>
         <label>ТИК<select id="tik"><option value="">Все ТИК</option></select></label>
         <label>УИК<select id="precinct"><option value="">Все УИК</option></select></label>
         <div class="update-note">Автообновление: 30 сек.<br><span id="updated-at">—</span></div>
@@ -56,12 +57,14 @@
         <article class="panel"><header><div><p class="kicker">ПОРТРЕТ</p><h2>Пол и возраст</h2></div></header><h3>Пол</h3><div id="gender-chart"></div><h3>Возраст</h3><div id="age-chart"></div></article>
       </section>
 
+      <section class="panel newpeople-panel"><header><div><p class="kicker">НОВЫЕ ЛЮДИ</p><h2>Голоса по округам</h2></div><span class="panel-note">число и доля от анкет округа</span></header><div id="newpeople-chart"></div></section>
+
       <section class="panel timeline-panel"><header><div><p class="kicker">ДИНАМИКА</p><h2>Анкеты по времени</h2></div><span class="panel-note">по времени заполнения</span></header><div id="hours-chart" class="hour-chart"></div></section>
 
-      <section class="panel table-panel"><header><div><p class="kicker">ГЕОГРАФИЯ</p><h2 id="geo-title">Контроль по ТИК</h2></div><span class="panel-note">Нажмите строку, чтобы открыть участки</span></header><div class="table-scroll"><table><thead><tr><th>Территория</th><th>Анкет</th><th>Отказов</th><th>Испорчено</th><th>УИК с данными</th><th>Интервьюеров</th><th>Доля</th></tr></thead><tbody id="geo-table"></tbody></table></div></section>
+      <section class="panel table-panel"><header><div><p class="kicker">ГЕОГРАФИЯ</p><h2 id="geo-title">Контроль по ТИК</h2></div><span class="panel-note">Нажмите строку, чтобы открыть участки</span></header><div class="table-scroll"><table><thead><tr><th>Территория</th><th>Анкет</th><th>Отказов</th><th>Испорчено</th><th id="geo-col5">УИК с данными</th><th>Интервьюеров</th><th>Доля</th></tr></thead><tbody id="geo-table"></tbody></table></div></section>
 
       <section class="grid two lower">
-        <article class="panel table-panel"><header><div><p class="kicker">КОМАНДА</p><h2>Работа интервьюеров</h2></div></header><div class="table-scroll"><table><thead><tr><th>Интервьюер</th><th>Участок</th><th>Анкет</th><th>Отказов</th></tr></thead><tbody id="interviewers"></tbody></table></div></article>
+        <article class="panel table-panel"><header><div><p class="kicker">КОМАНДА</p><h2>Работа интервьюеров</h2></div><input id="interviewer-search" class="search-input" type="search" placeholder="Поиск по ФИО"></header><div class="table-scroll"><table><thead><tr><th>Интервьюер</th><th>Участок</th><th>Анкет</th><th>Отказов</th></tr></thead><tbody id="interviewers"></tbody></table></div></article>
         <article class="panel"><header><div><p class="kicker">ПОТОК</p><h2>Последние анкеты</h2></div></header><div id="recent" class="recent"></div></article>
       </section>
     </main>

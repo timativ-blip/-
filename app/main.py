@@ -41,6 +41,29 @@ HEADERS = ["ID анкеты", "Время заполнения", "Дата см�
            "Имя интервьюера", "ID УИК", "УИК", "Ответ", "Пол", "Возраст",
            "ID смены", "Получено сервером", "ТИК"]
 ALL_DAYS = "all"
+# Dashboard-only grouping of the 56 TIKs into their 12 electoral okrugs (source: coordinator's PDF).
+# Not a Sheets column; derived purely for dashboard aggregation from the existing "tik" value.
+OKRUGS = {
+    "118": ["ТИК города Балашиха", "ТИК города Реутов"],
+    "119": ["ТИК города Лобня", "ТИК города Солнечногорск", "ТИК города Дмитров", "ТИК города Химки"],
+    "120": ["ТИК города Коломна", "ТИК города Воскресенск", "ТИК города Кашира",
+            "ТИК города Луховицы", "ТИК города Зарайск", "ТИК поселка Серебряные Пруды"],
+    "121": ["ТИК города Красногорск", "ТИК города Истра", "ТИК города Клин", "ТИК города Волоколамск",
+            "ТИК поселка Шаховская", "ТИК поселка Лотошино", "ТИК поселка Восход"],
+    "122": ["ТИК города Люберцы", "ТИК города Видное", "ТИК города Раменское",
+            "ТИК города Котельники", "ТИК города Жуковский"],
+    "123": ["ТИК города Королев", "ТИК города Долгопрудный", "ТИК города Мытищи"],
+    "124": ["ТИК города Одинцово", "ТИК города Наро-Фоминск", "ТИК города Руза", "ТИК поселка Молодёжный",
+            "ТИК города Краснознаменск", "ТИК города Можайск", "ТИК поселка Власиха"],
+    "125": ["ТИК города Электросталь", "ТИК города Орехово-Зуево", "ТИК города Павловский Посад",
+            "ТИК города Егорьевск", "ТИК города Шатура"],
+    "126": ["ТИК города Подольск", "ТИК города Домодедово", "ТИК города Лыткарино"],
+    "127": ["ТИК города Сергиев Посад", "ТИК города Дубна", "ТИК города Талдом", "ТИК города Пушкино"],
+    "128": ["ТИК города Серпухов", "ТИК города Чехов", "ТИК города Ступино", "ТИК города Бронницы"],
+    "129": ["ТИК города Ногинск", "ТИК города Фрязино", "ТИК города Щелково", "ТИК города Лосино-Петровский",
+            "ТИК города Черноголовка", "ТИК поселка Звёздный городок"],
+}
+TIK_TO_OKRUG = {tik: okrug for okrug, tiks in OKRUGS.items() for tik in tiks}
 
 
 class Settings:
@@ -58,6 +81,9 @@ class Settings:
             raise RuntimeError("Precinct list must be nonempty with unique ids.")
         if self.production and any(p["id"].startswith("demo-") for p in self.precincts):
             raise RuntimeError("Replace demonstration precincts with the verified official list before production.")
+        unmapped = {p["tik"] for p in self.precincts if p.get("tik")} - set(TIK_TO_OKRUG)
+        if unmapped:
+            raise RuntimeError(f"TIKs missing from OKRUGS mapping: {sorted(unmapped)}")
         self.refusal_demographics = os.getenv("REFUSAL_DEMOGRAPHICS", "true").lower() == "true"
         self.spreadsheet = os.getenv("GOOGLE_SPREADSHEET_ID", "")
         self.sheet = os.getenv("GOOGLE_SHEET_NAME", "Анкеты")
@@ -245,7 +271,8 @@ def read_sheet(settings):
         return response.json().get("values", [])
 
 
-def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None, requested_precinct=None):
+def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
+                        requested_tik=None, requested_precinct=None):
     """Build a small, privacy-conscious aggregate from rows in Google Sheets."""
     rows = []
     for source in values:
@@ -264,6 +291,8 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None,
     selected_day = requested_day or (dates[0] if dates else datetime.now(settings.zone).date().isoformat())
     day_rows = rows if selected_day == ALL_DAYS else [row for row in rows if row["day"] == selected_day]
     filtered = day_rows
+    if requested_okrug:
+        filtered = [row for row in filtered if TIK_TO_OKRUG.get(row["tik"]) == requested_okrug]
     if requested_tik:
         filtered = [row for row in filtered if row["tik"] == requested_tik]
     if requested_precinct:
@@ -276,21 +305,51 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None,
     total = len(filtered)
 
     catalog_tiks = sorted({p.get("tik", "") for p in settings.precincts if p.get("tik")})
-    tik_rows = defaultdict(list)
+
+    okrug_rows = defaultdict(list)
     for row in day_rows:
-        tik_rows[row["tik"]].append(row)
-    tik_stats = []
-    for tik in catalog_tiks:
-        items = tik_rows.get(tik, [])
-        tik_stats.append({
-            "tik": tik,
+        okrug = TIK_TO_OKRUG.get(row["tik"])
+        if okrug:
+            okrug_rows[okrug].append(row)
+    okrug_stats = []
+    for okrug in sorted(OKRUGS):
+        items = okrug_rows.get(okrug, [])
+        okrug_stats.append({
+            "okrug": okrug,
             "total": len(items),
             "refusals": sum(x["answer"] == "Отказался отвечать" for x in items),
             "spoiled": sum(x["answer"] == "Испортил бюллетень" for x in items),
-            "uiks": len({x["precinct_id"] for x in items}),
+            "tiks": len({x["tik"] for x in items}),
             "interviewers": len({x["shift_id"] or f'{x["surname"]}|{x["name"]}' for x in items}),
         })
-    tik_stats.sort(key=lambda item: (-item["total"], item["tik"]))
+    okrug_stats.sort(key=lambda item: (-item["total"], item["okrug"]))
+
+    new_people_by_okrug = []
+    for okrug in sorted(OKRUGS):
+        items = okrug_rows.get(okrug, [])
+        okrug_total = len(items)
+        count = sum(x["answer"] == "Новые люди" for x in items)
+        new_people_by_okrug.append({
+            "label": f"Округ {okrug}", "count": count,
+            "percent": round(count * 100 / okrug_total, 1) if okrug_total else 0,
+        })
+
+    tik_stats = []
+    if requested_okrug:
+        tik_rows = defaultdict(list)
+        for row in okrug_rows.get(requested_okrug, []):
+            tik_rows[row["tik"]].append(row)
+        for tik in sorted(OKRUGS.get(requested_okrug, [])):
+            items = tik_rows.get(tik, [])
+            tik_stats.append({
+                "tik": tik,
+                "total": len(items),
+                "refusals": sum(x["answer"] == "Отказался отвечать" for x in items),
+                "spoiled": sum(x["answer"] == "Испортил бюллетень" for x in items),
+                "uiks": len({x["precinct_id"] for x in items}),
+                "interviewers": len({x["shift_id"] or f'{x["surname"]}|{x["name"]}' for x in items}),
+            })
+        tik_stats.sort(key=lambda item: (-item["total"], item["tik"]))
 
     uik_stats = []
     if requested_tik:
@@ -350,11 +409,16 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None,
         recent.append({"time": display_time, "tik": row["tik"], "precinct": row["precinct"], "answer": row["answer"]})
 
     party_order = [label for party_id, label in PARTIES if party_id != "2"]
+    parties = [{"label": label, "count": answers[label],
+                "percent": round(answers[label] * 100 / total, 1) if total else 0} for label in party_order]
+    parties.sort(key=lambda item: -item["count"])
     return {
         "generated_at": datetime.now(settings.zone).isoformat(),
-        "selected_day": selected_day, "selected_tik": requested_tik or "",
+        "selected_day": selected_day, "selected_okrug": requested_okrug or "",
+        "selected_tik": requested_tik or "",
         "selected_precinct": requested_precinct or "", "available_dates": dates,
-        "filters": {"tiks": catalog_tiks,
+        "filters": {"okrugs": sorted(OKRUGS),
+                    "tiks": (sorted(OKRUGS.get(requested_okrug, [])) if requested_okrug else []),
                     "precincts": ([{"id": p["id"], "label": p["label"]}
                                    for p in settings.precincts if p.get("tik") == requested_tik]
                                   if requested_tik else [])},
@@ -362,14 +426,14 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None,
                     "spoiled": answers["Испортил бюллетень"], "interviewers": len(shifts),
                     "uiks": len({row["precinct_id"] for row in filtered}),
                     "tiks": len({row["tik"] for row in filtered if row["tik"]})},
-        "parties": [{"label": label, "count": answers[label],
-                     "percent": round(answers[label] * 100 / total, 1) if total else 0} for label in party_order],
+        "parties": parties,
         "genders": [{"label": label, "count": genders[label],
                      "percent": round(genders[label] * 100 / total, 1) if total else 0} for label in ("Мужской", "Женский")],
         "ages": [{"label": label, "count": ages[label],
                   "percent": round(ages[label] * 100 / total, 1) if total else 0} for label in AGES],
         "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
-        "tik_stats": tik_stats, "uik_stats": uik_stats,
+        "new_people_by_okrug": new_people_by_okrug,
+        "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,
     }
 
@@ -518,15 +582,20 @@ def create_app(settings=None):
         return {"ok": True}
 
     @app.get("/api/dashboard/data", dependencies=[Depends(dashboard_authorized)])
-    def dashboard_data(day: str | None = None, tik: str | None = None, precinct: str | None = None):
+    def dashboard_data(day: str | None = None, okrug: str | None = None,
+                        tik: str | None = None, precinct: str | None = None):
         if day and day != ALL_DAYS and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
             raise HTTPException(422, "Неверная дата")
+        if okrug and okrug not in OKRUGS:
+            raise HTTPException(422, "Неизвестный округ")
         if tik and tik not in {p.get("tik") for p in settings.precincts}:
             raise HTTPException(422, "Неизвестный ТИК")
+        if okrug and tik and TIK_TO_OKRUG.get(tik) != okrug:
+            raise HTTPException(422, "ТИК не относится к выбранному округу")
         if precinct and precinct not in {p["id"] for p in settings.precincts}:
             raise HTTPException(422, "Неизвестный УИК")
         try:
-            return dashboard_snapshot(cached_sheet_values(), settings, day, tik, precinct)
+            return dashboard_snapshot(cached_sheet_values(), settings, day, okrug, tik, precinct)
         except Exception as exc:
             LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
             raise HTTPException(502, "Не удалось прочитать Google Таблицу")

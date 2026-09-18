@@ -2,7 +2,8 @@
 const $ = selector => document.querySelector(selector);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let timer = null;
-const filters = {day:'', tik:'', precinct:''};
+let allInterviewers = [];
+const filters = {day:'', okrug:'', tik:'', precinct:''};
 
 async function request(url, options = {}) {
   const response = await fetch(url, {credentials:'same-origin', cache:'no-store', ...options});
@@ -56,48 +57,70 @@ function renderHours(items) {
   box.querySelectorAll('.hour i').forEach((el, index) => { el.style.height = Math.max(3, items[index].count / max * 145) + 'px'; });
 }
 function renderGeo(data) {
-  const uikMode = Boolean(filters.tik);
-  $('#geo-title').textContent = uikMode ? 'Контроль по УИК' : 'Контроль по ТИК';
-  const items = uikMode ? data.uik_stats : data.tik_stats;
+  const level = filters.tik ? 'uik' : (filters.okrug ? 'tik' : 'okrug');
+  const titles = {okrug:'Контроль по округам', tik:'Контроль по ТИК', uik:'Контроль по УИК'};
+  const subheads = {okrug:'ТИК с данными', tik:'УИК с данными', uik:'УИК с данными'};
+  $('#geo-title').textContent = titles[level];
+  $('#geo-col5').textContent = subheads[level];
+  const items = level === 'uik' ? data.uik_stats : level === 'tik' ? data.tik_stats : data.okrug_stats;
   const max = Math.max(1, ...items.map(x => x.total));
   const table = $('#geo-table');
   table.innerHTML = items.length ? items.map(item => {
-    const name = uikMode ? item.label : item.tik;
-    const cells = uikMode
-      ? `<td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(item.spoiled)}</td><td>${item.total ? '1' : '0'}</td><td>${number(item.interviewers)}</td>`
-      : `<td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(item.spoiled)}</td><td>${number(item.uiks)}</td><td>${number(item.interviewers)}</td>`;
-    return `<tr class="${uikMode ? '' : 'clickable'}" ${uikMode ? '' : `data-tik="${escapeHTML(item.tik)}"`}><td class="territory">${escapeHTML(name)}</td>${cells}<td><div class="share"><i></i><span>${data.summary.total ? Math.round(item.total*100/data.summary.total) : 0}%</span></div></td></tr>`;
+    const name = level === 'uik' ? item.label : level === 'tik' ? item.tik : `Округ ${item.okrug}`;
+    const cells = level === 'okrug'
+      ? `<td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(item.spoiled)}</td><td>${number(item.tiks)}</td><td>${number(item.interviewers)}</td>`
+      : level === 'tik'
+      ? `<td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(item.spoiled)}</td><td>${number(item.uiks)}</td><td>${number(item.interviewers)}</td>`
+      : `<td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(item.spoiled)}</td><td>${item.total ? '1' : '0'}</td><td>${number(item.interviewers)}</td>`;
+    const clickable = level !== 'uik';
+    const dataAttr = level === 'okrug' ? `data-okrug="${escapeHTML(item.okrug)}"` : level === 'tik' ? `data-tik="${escapeHTML(item.tik)}"` : '';
+    return `<tr class="${clickable ? 'clickable' : ''}" ${dataAttr}><td class="territory">${escapeHTML(name)}</td>${cells}<td><div class="share"><i></i><span>${data.summary.total ? Math.round(item.total*100/data.summary.total) : 0}%</span></div></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">За выбранный период данных нет</td></tr>';
   table.querySelectorAll('.share i').forEach((el, index) => { el.style.width = (items[index].total / max * 70) + 'px'; });
-  document.querySelectorAll('#geo-table tr[data-tik]').forEach(row => row.addEventListener('click', () => { filters.tik = row.dataset.tik; filters.precinct = ''; load(); }));
+  table.querySelectorAll('tr[data-okrug]').forEach(row => row.addEventListener('click', () => { filters.okrug = row.dataset.okrug; filters.tik = ''; filters.precinct = ''; load(); }));
+  table.querySelectorAll('tr[data-tik]').forEach(row => row.addEventListener('click', () => { filters.tik = row.dataset.tik; filters.precinct = ''; load(); }));
+}
+function applyInterviewerFilter() {
+  const query = ($('#interviewer-search')?.value || '').trim().toLowerCase();
+  const items = query ? allInterviewers.filter(item => item.name.toLowerCase().includes(query)) : allInterviewers;
+  const empty = allInterviewers.length ? 'Совпадений не найдено' : 'Нет данных об интервьюерах';
+  $('#interviewers').innerHTML = items.length ? items.map(item => `<tr><td class="territory">${escapeHTML(item.name)}</td><td title="${escapeHTML(item.tik)}">${escapeHTML(item.precinct)}</td><td>${number(item.total)}</td><td>${number(item.refusals)}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">${empty}</td></tr>`;
 }
 function renderInterviewers(items) {
-  $('#interviewers').innerHTML = items.length ? items.map(item => `<tr><td class="territory">${escapeHTML(item.name)}</td><td title="${escapeHTML(item.tik)}">${escapeHTML(item.precinct)}</td><td>${number(item.total)}</td><td>${number(item.refusals)}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных об интервьюерах</td></tr>';
+  allInterviewers = items;
+  applyInterviewerFilter();
 }
 function renderRecent(items) {
   $('#recent').innerHTML = items.length ? items.map(item => `<div class="recent-row"><div class="recent-time">${escapeHTML(item.time)}</div><div class="recent-place"><strong>${escapeHTML(item.precinct)}</strong><span>${escapeHTML(item.tik)}</span></div><span class="answer ${item.answer === 'Отказался отвечать' ? 'refused' : ''}">${escapeHTML(item.answer)}</span></div>`).join('') : '<p class="empty">Пока нет анкет</p>';
 }
 function renderFilters(data) {
-  filters.day = data.selected_day; filters.tik = data.selected_tik; filters.precinct = data.selected_precinct;
+  filters.day = data.selected_day; filters.okrug = data.selected_okrug;
+  filters.tik = data.selected_tik; filters.precinct = data.selected_precinct;
   const dayOptions = data.available_dates.length
     ? data.available_dates.map(day => option(day,dateLabel(day),filters.day)).join('')
     : (filters.day !== 'all' ? option(filters.day,dateLabel(filters.day),filters.day) : '');
   $('#day').innerHTML = option('all','Все дни',filters.day) + dayOptions;
-  $('#tik').innerHTML = option('','Все ТИК',filters.tik) + data.filters.tiks.map(tik => option(tik,tik,filters.tik)).join('');
+  $('#okrug').innerHTML = option('','Все округа',filters.okrug) + data.filters.okrugs.map(o => option(o,'Округ ' + o,filters.okrug)).join('');
+  const tikPlaceholder = filters.okrug ? 'Все ТИК' : 'Сначала выберите округ';
+  $('#tik').innerHTML = option('',tikPlaceholder,filters.tik) + data.filters.tiks.map(tik => option(tik,tik,filters.tik)).join('');
+  $('#tik').disabled = !filters.okrug;
   $('#precinct').innerHTML = option('','Все УИК',filters.precinct) + data.filters.precincts.map(p => option(p.id,p.label,filters.precinct)).join('');
   $('#precinct').disabled = !filters.tik;
 }
 function render(data) {
   renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties);
   renderColumns('#gender-chart',data.genders,{compact:true}); renderColumns('#age-chart',data.ages,{compact:true}); renderHours(data.hours);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug);
   renderGeo(data); renderInterviewers(data.interviewers); renderRecent(data.recent);
-  $('#period-label').textContent = `${dateLabel(data.selected_day)}${filters.tik ? ' · ' + filters.tik : ''}`;
+  const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
+  $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;
   $('#updated-at').textContent = 'Обновлено в ' + new Date(data.generated_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 async function load() {
   clearTimeout(timer); $('#refresh').disabled = true; status('', 'Обновляем данные'); $('#data-error').hidden = true;
   const query = new URLSearchParams();
-  if (filters.day) query.set('day',filters.day); if (filters.tik) query.set('tik',filters.tik); if (filters.precinct) query.set('precinct',filters.precinct);
+  if (filters.day) query.set('day',filters.day); if (filters.okrug) query.set('okrug',filters.okrug);
+  if (filters.tik) query.set('tik',filters.tik); if (filters.precinct) query.set('precinct',filters.precinct);
   try {
     const data = await request('/api/dashboard/data?' + query); render(data); showDashboard(); status('ready','Данные актуальны');
   } catch (error) {
@@ -112,7 +135,9 @@ $('#login-form').addEventListener('submit', async event => {
 });
 $('#refresh').addEventListener('click',load);
 $('#day').addEventListener('change',event => { filters.day=event.target.value; filters.precinct=''; load(); });
+$('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });
 $('#tik').addEventListener('change',event => { filters.tik=event.target.value; filters.precinct=''; load(); });
 $('#precinct').addEventListener('change',event => { filters.precinct=event.target.value; load(); });
+document.addEventListener('input', event => { if (event.target.id === 'interviewer-search') applyInterviewerFilter(); });
 document.addEventListener('visibilitychange',() => { if (!document.hidden && !$('#dashboard').hidden) load(); });
 (async function init(){ try { await request('/api/dashboard/session'); await load(); } catch(error) { showLogin(error.status === 503 ? error.message : ''); } })();

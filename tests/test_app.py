@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import Settings, connect, create_app, dashboard_snapshot, export_once
+from app.main import OKRUGS, Settings, TIK_TO_OKRUG, connect, create_app, dashboard_snapshot, export_once
 
 
 @pytest.fixture
@@ -205,7 +205,7 @@ def test_dashboard_all_days_combines_totals(settings):
     assert all_days["selected_day"] == "all"
     assert all_days["summary"]["total"] == 2
     assert next(x for x in all_days["parties"] if x["label"] == "Новые люди")["count"] == 1
-    assert all_days["tik_stats"][0]["total"] == 2
+    assert sum(item["total"] for item in all_days["okrug_stats"]) == 2
 
 
 def test_dashboard_all_days_accepted_by_endpoint(settings, monkeypatch):
@@ -217,6 +217,80 @@ def test_dashboard_all_days_accepted_by_endpoint(settings, monkeypatch):
         response = client.get("/api/dashboard/data?day=all")
         assert response.status_code == 200
         assert response.json()["selected_day"] == "all"
+
+
+def test_okrugs_cover_every_precinct_tik(settings):
+    tiks = {p["tik"] for p in settings.precincts if p.get("tik")}
+    assert tiks <= set(TIK_TO_OKRUG)
+    assert len(OKRUGS) == 12
+
+
+def test_okrug_groups_tiks_and_drills_down(settings):
+    balashikha = next(p for p in settings.precincts if p["tik"] == "ТИК города Балашиха")
+    dmitrov = next(p for p in settings.precincts if p["tik"] == "ТИК города Дмитров")
+    values = [
+        ["one", "2026-09-16T08:00:00+00:00", "2026-09-16", "А", "Б",
+         balashikha["id"], balashikha["label"], "Новые люди", "Женский", "25–34", "shift-1", "", "ТИК города Балашиха"],
+        ["two", "2026-09-16T09:00:00+00:00", "2026-09-16", "В", "Г",
+         dmitrov["id"], dmitrov["label"], "Единая Россия", "Мужской", "45–60", "shift-2", "", "ТИК города Дмитров"],
+    ]
+    top = dashboard_snapshot(values, settings, requested_day="2026-09-16")
+    assert top["tik_stats"] == []
+    okrug_118 = next(x for x in top["okrug_stats"] if x["okrug"] == "118")
+    okrug_119 = next(x for x in top["okrug_stats"] if x["okrug"] == "119")
+    assert okrug_118["total"] == 1
+    assert okrug_119["total"] == 1
+    assert len(top["okrug_stats"]) == 12
+
+    drilled = dashboard_snapshot(values, settings, requested_day="2026-09-16", requested_okrug="118")
+    assert drilled["summary"]["total"] == 1
+    assert drilled["filters"]["tiks"] == sorted(OKRUGS["118"])
+    nonzero = [item["tik"] for item in drilled["tik_stats"] if item["total"]]
+    assert nonzero == ["ТИК города Балашиха"]
+
+
+def test_okrug_endpoint_validation(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    monkeypatch.setattr("app.main.read_sheet", lambda _: [])
+    with TestClient(create_app(settings)) as client:
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        assert client.get("/api/dashboard/data", params={"okrug": "999"}).status_code == 422
+        assert client.get("/api/dashboard/data",
+                           params={"okrug": "118", "tik": "ТИК города Дмитров"}).status_code == 422
+        assert client.get("/api/dashboard/data", params={"okrug": "118"}).status_code == 200
+
+
+def test_parties_sorted_by_count_desc(settings):
+    precinct = settings.precincts[0]
+    tik = precinct["tik"]
+    values = [
+        ["one", "2026-09-16T08:00:00+00:00", "2026-09-16", "А", "Б",
+         precinct["id"], precinct["label"], "ЛДПР", "Мужской", "25–34", "s1", "", tik],
+        ["two", "2026-09-16T08:05:00+00:00", "2026-09-16", "А", "Б",
+         precinct["id"], precinct["label"], "Единая Россия", "Мужской", "25–34", "s1", "", tik],
+        ["three", "2026-09-16T08:10:00+00:00", "2026-09-16", "А", "Б",
+         precinct["id"], precinct["label"], "Единая Россия", "Мужской", "25–34", "s1", "", tik],
+    ]
+    result = dashboard_snapshot(values, settings, requested_day="2026-09-16")
+    counts = [item["count"] for item in result["parties"]]
+    assert counts == sorted(counts, reverse=True)
+    assert result["parties"][0]["label"] == "Единая Россия"
+
+
+def test_new_people_by_okrug(settings):
+    balashikha = next(p for p in settings.precincts if p["tik"] == "ТИК города Балашиха")
+    values = [
+        ["one", "2026-09-16T08:00:00+00:00", "2026-09-16", "А", "Б",
+         balashikha["id"], balashikha["label"], "Новые люди", "Женский", "25–34", "s1", "", "ТИК города Балашиха"],
+        ["two", "2026-09-16T08:05:00+00:00", "2026-09-16", "А", "Б",
+         balashikha["id"], balashikha["label"], "Единая Россия", "Женский", "25–34", "s1", "", "ТИК города Балашиха"],
+    ]
+    result = dashboard_snapshot(values, settings, requested_day="2026-09-16")
+    assert len(result["new_people_by_okrug"]) == 12
+    entry = next(x for x in result["new_people_by_okrug"] if x["label"] == "Округ 118")
+    assert entry["count"] == 1
+    assert entry["percent"] == 50.0
 
 
 def test_dashboard_uses_separate_code(settings, monkeypatch):
