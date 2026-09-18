@@ -6,6 +6,7 @@ let allInterviewers = [];
 let interviewersTotal = 0;
 let anomalyPayload = null;
 let lastAgeHeat = null;
+let previousInsightTotal = null;
 let showClosedAnomalies = false;
 let anomalyRenderPending = false;
 const interviewerSort = {key:'', dir:'desc'};
@@ -149,6 +150,20 @@ function renderAgeHeatmap(heat) {
   });
   $('#ageheat-note').textContent = validOnly ? 'Доля внутри возрастной группы среди ответивших партии (без отказов и испорченных бюллетеней).' : 'Доля внутри возрастной группы от всех её анкет, включая отказы. Яркость — относительно максимума в строке.';
 }
+function renderInsights(items, summary, generatedAt) {
+  const sections = [];
+  items.forEach(item => {
+    let section = sections.find(x => x.name === item.section);
+    if (!section) { section = {name: item.section, items: []}; sections.push(section); }
+    section.items.push(item);
+  });
+  $('#insights').innerHTML = sections.map(section => `<article class="insight-card"><h3>${escapeHTML(section.name)}</h3><ul>${section.items.map(item => `<li class="lvl-${escapeHTML(item.level)}">${escapeHTML(item.text)}</li>`).join('')}</ul></article>`).join('');
+  const scopeKey = [filters.day, filters.okrug, filters.tik, filters.precinct].join('|');
+  const delta = previousInsightTotal && previousInsightTotal.key === scopeKey ? summary.total - previousInsightTotal.total : 0;
+  previousInsightTotal = {key: scopeKey, total: summary.total};
+  const time = new Date(generatedAt).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  $('#insights-meta').textContent = `Обновлено в ${time}` + (delta > 0 ? ` · +${number(delta)} анкет с прошлого обновления` : '');
+}
 function renderSummary(summary) {
   const cards = [
     ['Всего анкет',summary.total,'За выбранный период','accent'],
@@ -283,7 +298,7 @@ function renderFilters(data) {
 function render(data) {
   renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties);
   renderColumns('#gender-chart',data.genders,{compact:true}); renderColumns('#age-chart',data.ages,{compact:true}); renderHours(data.hours);
-  renderColumns('#newpeople-chart',data.new_people_by_okrug); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderForecast(data.forecast, data.summary);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderForecast(data.forecast, data.summary); renderInsights(data.insights, data.summary, data.generated_at);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;

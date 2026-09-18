@@ -716,6 +716,184 @@ def forecast_shares(rows, uik_counts=None):
     return result
 
 
+SERVICE_ANSWERS = ("Испортил бюллетень", "Отказался отвечать")
+INSIGHT_MIN_N = 30
+
+
+def _fmt_int(value):
+    return f"{int(value):,}".replace(",", "\u00a0")
+
+
+def _pct(value):
+    return f"{round(value, 1):g}%"
+
+
+def build_insights(snap):
+    """Plain-language observations from fixed rules over the current dashboard payload (no model involved)."""
+    items = []
+
+    def add(section, level, text):
+        items.append({"section": section, "level": level, "text": text})
+
+    summary = snap["summary"]
+    total = summary["total"]
+    if not total:
+        return [{"section": "Итоги", "level": "info",
+                 "text": "В выбранной области пока нет анкет. Анализ появится, когда придут данные."}]
+    named = [p for p in snap["parties"] if p["label"] not in SERVICE_ANSWERS]
+    named_total = sum(p["count"] for p in named)
+    refusal_share = summary["refusals"] * 100 / total
+    add("Итоги", "warning" if refusal_share >= 40 else "info",
+        f"Собрано {_fmt_int(total)} анкет: партию назвали {_fmt_int(named_total)} ({_pct(named_total * 100 / total)}), "
+        f"отказались {_fmt_int(summary['refusals'])} ({_pct(refusal_share)}), "
+        f"испортили бюллетень {_fmt_int(summary['spoiled'])}.")
+    if refusal_share >= 40:
+        add("Итоги", "warning", "Доля отказов высокая: доли партий среди ответивших могут быть смещены, "
+                                "смотрите вкладку «Прогноз».")
+    add("Итоги", "info", f"Данные по {summary['tiks']} ТИК и {summary['uiks']} УИК, смен интервьюеров: "
+                         f"{summary['interviewers']}.")
+
+    if named_total >= INSIGHT_MIN_N:
+        ranked = sorted(named, key=lambda p: -p["count"])
+        lead, second = ranked[0], ranked[1]
+        lead_share, second_share = lead["count"] * 100 / named_total, second["count"] * 100 / named_total
+        gap = round(lead_share - second_share, 1)
+        add("Партии", "notable" if gap < 3 else "info",
+            f"Среди назвавших партию лидирует {lead['label']}: {_pct(lead_share)} ({_fmt_int(lead['count'])}), "
+            f"затем {second['label']} — {_pct(second_share)}. Отрыв {gap:g} п.п."
+            + (" Гонка близка." if gap < 3 else ""))
+        add("Партии", "info", f"Три первые партии набирают {_pct(sum(p['count'] for p in ranked[:3]) * 100 / named_total)} ответивших.")
+    else:
+        add("Партии", "info", f"Партию назвали только {named_total} человек: для выводов по партиям мало данных.")
+
+    forecast = snap.get("forecast")
+    if forecast and forecast["scope"]["respondents"] >= INSIGHT_MIN_N:
+        first, second = forecast["rows"][0], forecast["rows"][1]
+        add("Прогноз", "info",
+            f"Прогноз по всем данным: {first['label']} {_pct(first['forecast'])} (± {first['margin']:g} п.п.), "
+            f"{second['label']} {_pct(second['forecast'])}. Поправка к доле ответивших у лидера: {first['delta']:+g} п.п.")
+        if first["trend"] is not None:
+            drifting = abs(first["trend"]) > 1
+            add("Прогноз", "notable" if drifting else "info",
+                (f"Оценка ещё дрейфует: за последние 30% данных лидер сдвинулся на {first['trend']:+g} п.п."
+                 if drifting else f"Оценка стабильна: за последние 30% данных лидер сдвинулся на {first['trend']:+g} п.п."))
+        scope = forecast["scope"]
+        add("Прогноз", "notable" if scope["covered_share"] < 60 else "info",
+            f"Прогноз опирается на данные по {scope['tiks_with_data']} из {scope['tiks_total']} ТИК "
+            f"({scope['covered_share']}% участков области). Электронное голосование опросом не охвачено.")
+
+    genders = {g["label"]: g["count"] for g in snap["genders"]}
+    men, women = genders.get("Мужской", 0), genders.get("Женский", 0)
+    if men + women >= INSIGHT_MIN_N:
+        more, less, word = (women, men, "женщин") if women >= men else (men, women, "мужчин")
+        add("Демография", "info", f"Среди опрошенных больше {word}: {_pct(more * 100 / (men + women))} против {_pct(less * 100 / (men + women))}.")
+    biggest_age = max(snap["ages"], key=lambda a: a["count"])
+    if biggest_age["count"]:
+        add("Демография", "info", f"Самая многочисленная возрастная группа — {biggest_age['label']}: {_pct(biggest_age['percent'])} анкет.")
+    by_age = snap["party_age"]
+    age_names = [a["age"] for a in by_age["ages"]]
+    refused_row = next((r for r in by_age["rows"] if r["label"] == "Отказался отвечать"), None)
+    if refused_row:
+        rates = [(age_names[i], refused_row["cells"][i]["count"] * 100 / by_age["ages"][i]["total"])
+                 for i in range(len(age_names)) if by_age["ages"][i]["total"] >= INSIGHT_MIN_N]
+        if len(rates) >= 2:
+            high, low = max(rates, key=lambda r: r[1]), min(rates, key=lambda r: r[1])
+            if high[1] - low[1] >= 5:
+                add("Демография", "notable", f"Чаще всего отказываются в группе {high[0]} ({_pct(high[1])}), реже всего — в группе {low[0]} ({_pct(low[1])}).")
+    age_party_rows = [r for r in by_age["rows"] if r["label"] not in SERVICE_ANSWERS]
+    named_by_age = [sum(r["cells"][i]["count"] for r in age_party_rows) for i in range(len(age_names))]
+    for row in age_party_rows[:2]:
+        shares = [(age_names[i], row["cells"][i]["count"] * 100 / named_by_age[i])
+                  for i in range(len(age_names)) if named_by_age[i] >= INSIGHT_MIN_N]
+        if len(shares) >= 2:
+            high, low = max(shares, key=lambda r: r[1]), min(shares, key=lambda r: r[1])
+            if high[1] - low[1] >= 8:
+                add("Демография", "notable", f"{row['label']}: сильнее всего в группе {high[0]} ({_pct(high[1])} назвавших), слабее всего — в группе {low[0]} ({_pct(low[1])}).")
+
+    okrug_stats = snap["okrug_stats"]
+    active = [o for o in okrug_stats if o["total"]]
+    if active:
+        biggest = max(active, key=lambda o: o["total"])
+        add("Территории", "info",
+            f"Данные есть по {len(active)} из {len(okrug_stats)} округов; больше всего анкет в округе {biggest['okrug']} "
+            f"({_fmt_int(biggest['total'])}, {_pct(biggest['total'] * 100 / sum(o['total'] for o in okrug_stats))} всех).")
+    heat = snap["party_okrug"]
+    okrug_ids = [o["okrug"] for o in heat["okrugs"]]
+    heat_parties = [r for r in heat["rows"] if r["label"] not in SERVICE_ANSWERS]
+    named_by_okrug = [sum(r["cells"][i]["count"] for r in heat_parties) for i in range(len(okrug_ids))]
+    if heat_parties:
+        row = heat_parties[0]
+        shares = [(okrug_ids[i], row["cells"][i]["count"] * 100 / named_by_okrug[i])
+                  for i in range(len(okrug_ids)) if named_by_okrug[i] >= INSIGHT_MIN_N]
+        if len(shares) >= 2:
+            high, low = max(shares, key=lambda r: r[1]), min(shares, key=lambda r: r[1])
+            if high[1] - low[1] >= 10:
+                add("Территории", "notable", f"{row['label']}: сильнее всего в округе {high[0]} ({_pct(high[1])} назвавших), слабее всего — в округе {low[0]} ({_pct(low[1])}).")
+    refused_row = next((r for r in heat["rows"] if r["label"] == "Отказался отвечать"), None)
+    if refused_row:
+        rates = [(okrug_ids[i], refused_row["cells"][i]["count"] * 100 / heat["okrugs"][i]["total"])
+                 for i in range(len(okrug_ids)) if heat["okrugs"][i]["total"] >= INSIGHT_MIN_N]
+        if len(rates) >= 2:
+            high, low = max(rates, key=lambda r: r[1]), min(rates, key=lambda r: r[1])
+            if high[1] - low[1] >= 10:
+                add("Территории", "notable", f"Больше всего отказов в округе {high[0]} ({_pct(high[1])}), меньше всего — в округе {low[0]} ({_pct(low[1])}).")
+
+    new_by_okrug = snap["new_people_by_okrug"]
+    if sum(x["count"] for x in new_by_okrug):
+        top = max(new_by_okrug, key=lambda x: x["count"])
+        totals = {o["okrug"]: o["total"] for o in heat["okrugs"]}
+        eligible = [x for x in new_by_okrug if totals.get(x["label"].split()[-1], 0) >= INSIGHT_MIN_N]
+        text = f"За «Новых людей» больше всего голосов в округе {top['label'].split()[-1]} ({_fmt_int(top['count'])})"
+        if eligible:
+            best = max(eligible, key=lambda x: x["percent"])
+            text += f"; выше всего доля в округе {best['label'].split()[-1]} ({_pct(best['percent'])} анкет округа)"
+        add("Новые люди", "info", text + ".")
+    if named_total >= INSIGHT_MIN_N:
+        order = [p["label"] for p in sorted(named, key=lambda p: -p["count"])]
+        if "Новые люди" in order:
+            place = order.index("Новые люди") + 1
+            share = next(p["count"] for p in named if p["label"] == "Новые люди") * 100 / named_total
+            add("Новые люди", "info", f"«Новые люди» — {place}-е место среди назвавших партию ({_pct(share)}).")
+    age_groups = [g for g in snap["new_people_by_age"] if g["total"] >= 20]
+    if age_groups and any(g["count"] for g in age_groups):
+        best, worst = max(age_groups, key=lambda g: g["percent"]), min(age_groups, key=lambda g: g["percent"])
+        add("Новые люди", "notable" if best["percent"] - worst["percent"] >= 8 else "info",
+            f"Чаще всего за «Новых людей» голосует группа {best['label']}: {_pct(best['percent'])} её анкет "
+            f"({best['count']} из {best['total']}); реже всего — {worst['label']} ({_pct(worst['percent'])}).")
+
+    counts = [h["count"] for h in snap["hours"]]
+    if sum(counts):
+        peak = max(range(len(counts)), key=lambda i: counts[i])
+        nonzero = [i for i, c in enumerate(counts) if c]
+        first_hour, last_hour = snap["hours"][nonzero[0]]["hour"], snap["hours"][nonzero[-1]]["hour"][:2]
+        add("Поток", "info", f"Анкеты поступали с {first_hour} до {last_hour}:59, пик — {snap['hours'][peak]['hour']} ({_fmt_int(counts[peak])} анкет).")
+        strong = [i for i, c in enumerate(counts) if c >= counts[peak] * 0.5]
+        after = counts[strong[-1] + 1:nonzero[-1] + 1]
+        if after and all(c <= counts[peak] * 0.25 for c in after):
+            add("Поток", "notable", f"После {snap['hours'][strong[-1]]['hour'][:2]}:59 поток заметно снизился: не выше четверти от пика.")
+
+    people = snap["interviewers"]
+    if people:
+        lead = people[0]
+        add("Интервьюеры и качество", "info", f"Больше всех анкет у {lead['name']}: {_fmt_int(lead['total'])} ({_pct(lead['total'] * 100 / total)} от всех).")
+        rated = [(p, p["refusals"] * 100 / p["total"]) for p in people if p["total"] >= 15]
+        if len(rated) >= 3:
+            high, low = max(rated, key=lambda r: r[1]), min(rated, key=lambda r: r[1])
+            if high[1] - low[1] >= 30:
+                add("Интервьюеры и качество", "notable", f"Доля отказов сильно различается по интервьюерам: от {_pct(low[1])} до {_pct(high[1])} ({high[0]['name']}).")
+    anomalies = snap["anomalies"]
+    if anomalies["open"]:
+        open_items = [a for a in anomalies["items"] if a["status"] == "open"]
+        high_count = sum(1 for a in open_items if a["severity"] == "high")
+        common, occurrences = Counter(a["title"] for a in open_items).most_common(1)[0]
+        add("Интервьюеры и качество", "warning" if high_count else "notable",
+            f"Открыто аномалий: {anomalies['open']}" + (f", из них высоких: {high_count}" if high_count else "")
+            + f". Чаще всего: «{common}» ({occurrences}).")
+    else:
+        add("Интервьюеры и качество", "info", "Открытых аномалий нет.")
+    return items
+
+
 def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
                         requested_tik=None, requested_precinct=None, statuses=None):
     """Build a small, privacy-conscious aggregate from rows in Google Sheets."""
@@ -909,7 +1087,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
     parties = [{"label": label, "count": answers[label],
                 "percent": round(answers[label] * 100 / total, 1) if total else 0} for label in party_order]
     parties.sort(key=lambda item: -item["count"])
-    return {
+    result = {
         "generated_at": datetime.now(settings.zone).isoformat(),
         "selected_day": selected_day, "selected_okrug": requested_okrug or "",
         "selected_tik": requested_tik or "",
@@ -935,6 +1113,8 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,
     }
+    result["insights"] = build_insights(result)
+    return result
 
 
 def create_app(settings=None):

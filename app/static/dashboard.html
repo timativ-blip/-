@@ -52,6 +52,14 @@
 
       <section id="summary" class="summary" aria-label="Ключевые показатели"></section>
 
+      <section class="panel table-panel insights-panel"><header><div><p class="kicker">АНАЛИТИКА</p><h2>Что показывают данные</h2><p id="insights-meta" class="subtle"></p></div><span class="panel-note">обновляется вместе с данными, учитывает фильтры</span></header>
+        <div id="insights" class="insights"></div>
+        <details class="method"><summary>Как формируется этот анализ</summary>
+          <p>Тексты строятся автоматически по фиксированным правилам из тех же данных, что и диаграммы, и пересчитываются при каждом обновлении (раз в 30 секунд) с учётом выбранных фильтров. Нейросеть не используется: одни и те же данные всегда дают одни и те же выводы.</p>
+          <p>Чтобы не делать выводы по случайным цифрам, сравнения по возрасту, округам и интервьюерам считаются только для групп от 30 анкет (для «Новых людей» по возрасту — от 20). Пометка «заметно» ставится при большом разрыве (например, 8–10 п.п. между группами), «внимание» — при высокой доле отказов, открытых серьёзных аномалиях или дрейфе прогноза.</p>
+        </details>
+      </section>
+
       <section class="grid two">
         <article class="panel party-panel"><header><div><p class="kicker">РЕЗУЛЬТАТЫ</p><h2>Ответы по партиям</h2></div><div class="tabs" role="tablist" aria-label="Режим"><button class="tab active" type="button" role="tab" aria-selected="true" data-tab="answers">Ответы</button><button class="tab" type="button" role="tab" aria-selected="false" data-tab="forecast">Прогноз</button></div></header>
           <div id="tab-answers"><p class="panel-note tab-note">доля от всех анкет</p><div id="party-chart"></div></div>

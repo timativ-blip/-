@@ -696,3 +696,45 @@ def test_snapshot_has_forecast_and_age_heatmap(settings):
     assert [r["label"] for r in heat["rows"][-2:]] == ["Испортил бюллетень", "Отказался отвечать"]
     other_day = dashboard_snapshot(survey_rows(settings, spec), settings, requested_day="2026-09-15")
     assert other_day["forecast"]["rows"] == snap["forecast"]["rows"]
+
+
+def insight_sections(snapshot):
+    result = {}
+    for item in snapshot["insights"]:
+        result.setdefault(item["section"], []).append(item)
+    return result
+
+
+def test_insights_for_empty_scope(settings):
+    snap = dashboard_snapshot([], settings)
+    assert len(snap["insights"]) == 1 and "пока нет анкет" in snap["insights"][0]["text"]
+
+
+def test_insights_say_too_little_data_for_small_samples(settings):
+    snap = dashboard_snapshot(shift_rows(settings, 5), settings, requested_day="2026-09-16")
+    sections = insight_sections(snap)
+    assert any("мало данных" in i["text"] for i in sections["Партии"])
+    assert "Прогноз" not in sections
+
+
+def test_insights_cover_every_area_and_flag_high_refusals(settings):
+    rows = (shift_rows(settings, 120, answer=lambda i: "Отказался отвечать" if i % 2 else PARTY_CYCLE[i % 3])
+            + shift_rows(settings, 20, shift="s2", name="Пётр", start="2026-09-16T06:00:00+00:00", step=200))
+    snap = dashboard_snapshot(rows, settings, requested_day="2026-09-16")
+    sections = insight_sections(snap)
+    for name in ("Итоги", "Партии", "Прогноз", "Демография", "Территории", "Новые люди", "Поток", "Интервьюеры и качество"):
+        assert name in sections, name
+    assert any(i["level"] == "warning" and "отказов" in i["text"] for i in sections["Итоги"])
+    leader = next(p["label"] for p in snap["parties"] if p["label"] not in ("Отказался отвечать", "Испортил бюллетень"))
+    assert any("лидирует " + leader in i["text"] for i in sections["Партии"])
+    assert all(i["text"] and i["level"] in ("info", "notable", "warning") for i in snap["insights"])
+
+
+def test_insights_mention_open_anomalies_and_follow_statuses(settings):
+    rows = shift_rows(settings, 8, step=5)
+    text = " ".join(i["text"] for i in dashboard_snapshot(rows, settings, requested_day="2026-09-16")["insights"])
+    assert "Открыто аномалий: 1" in text
+    anomaly = dashboard_snapshot(rows, settings, requested_day="2026-09-16")["anomalies"]["items"][0]
+    closed = dashboard_snapshot(rows, settings, requested_day="2026-09-16",
+                                statuses={anomaly["id"]: {"status": "resolved", "note": "", "updated_at": "x"}})
+    assert "Открытых аномалий нет" in " ".join(i["text"] for i in closed["insights"])
