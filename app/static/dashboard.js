@@ -94,14 +94,14 @@ function renderForecastHistory(history) {
 function renderForecast(forecast, summary) {
   const body = $('#forecast-body'), warn = $('#forecast-warn');
   if (!forecast) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">Недостаточно ответов для прогноза</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty">Недостаточно ответов для прогноза</td></tr>';
     for (const id of ['forecast-summary', 'forecast-steps', 'forecast-history', 'forecast-ages', 'deg-head', 'deg-body', 'forecast-deg']) $('#' + id).innerHTML = '';
     warn.hidden = true;
     return;
   }
   const {scope, rows} = forecast;
   const top = Math.max(1, ...rows.map(r => r.forecast));
-  body.innerHTML = rows.map(r => `<tr><td class="territory">${escapeHTML(r.label)}</td><td>${r.answered}%</td><td><div class="share"><i></i><span><strong>${r.forecast}%</strong></span></div></td><td class="${r.delta > 0 ? 'delta-up' : r.delta < 0 ? 'delta-down' : ''}">${fmtSigned(r.delta)}</td><td>± ${r.margin} п.п.</td><td class="${r.trend > 0 ? 'delta-up' : r.trend < 0 ? 'delta-down' : ''}">${r.trend === null ? '—' : fmtSigned(r.trend)}</td></tr>`).join('');
+  body.innerHTML = rows.map(r => `<tr><td class="territory">${escapeHTML(r.label)}</td><td>${r.answered}%</td><td><div class="share"><i></i><span><strong>${r.forecast}%</strong></span></div></td><td class="${r.delta > 0 ? 'delta-up' : r.delta < 0 ? 'delta-down' : ''}">${fmtSigned(r.delta)}</td><td>± ${r.margin} п.п.</td><td class="${r.trend > 0 ? 'delta-up' : r.trend < 0 ? 'delta-down' : ''}">${r.trend === null ? '—' : fmtSigned(r.trend)}</td><td>${r.y2021 === null ? '—' : `${r.y2021}% (${fmtSigned(r.forecast - r.y2021)})`}</td></tr>`).join('');
   body.querySelectorAll('.share i').forEach((el, index) => { el.style.width = (rows[index].forecast / top * 90) + 'px'; });
   const refusalPercent = scope.anket ? Math.round(scope.refusers * 1000 / scope.anket) / 10 : 0;
   $('#forecast-summary').textContent = `Данные: ${number(scope.anket)} анкет · ответили ${number(scope.respondents)} · отказались ${number(scope.refusers)} (${refusalPercent}%) · ТИК с данными ${scope.tiks_with_data} из ${scope.tiks_total}`;
@@ -115,11 +115,12 @@ function renderForecast(forecast, summary) {
   const steps = [
     `<strong>Ответившие.</strong> ${number(scope.respondents)} человек назвали партию: ${lead.map(r => `${escapeHTML(r.label)} ${r.answered}%`).join(', ')}.`,
     `<strong>Отказавшиеся.</strong> ${number(scope.refusers)} человек не назвали партию. Мы знаем их округ, пол и возраст, поэтому распределили их по партиям так же, как ответивших в той же группе; малочисленные группы сглажены. Эффект шага, п.п.: ${effect('answered', 'with_refusals')}. Эффект мал, когда отказавшиеся по составу похожи на ответивших.`,
-    `<strong>Территории.</strong> Данные есть по ${scope.tiks_with_data} из ${scope.tiks_total} ТИК (${scope.covered_share}% участков области). Вес территории — число её УИК; ТИК без данных берут оценку своего округа. Эффект шага, п.п.: ${effect('with_refusals', 'forecast')}.`,
+    `<strong>Территории.</strong> Данные есть по ${scope.tiks_with_data} из ${scope.tiks_total} ТИК (${scope.covered_share}% электората области). Вес территории — число избирателей её округа (итоги 2021 как ориентир), между ТИК округа оно делится по числу УИК; ТИК без данных берут оценку своего округа. Эффект шага, п.п.: ${effect('with_refusals', 'forecast')}.`,
     `<strong>Поток.</strong> Оценка пересчитывалась по мере поступления анкет (график ниже): ${stable}.`,
+    forecast.flow ? `<strong>Охват потока.</strong> К ${forecast.flow.as_of} ${escapeHTML(dateLabel(forecast.flow.day))} на участках проголосовало ${forecast.flow.voted_by_share}% дневного потока (${escapeHTML(forecast.flow.source)}), последняя анкета этого дня: ${forecastMoment(forecast.flow.last_at)}. Вечерние ${forecast.flow.evening_share}% потока опросом почти не охвачены. Выборка к ${forecast.flow.as_of} — ${number(forecast.flow.anket_by_as_of)} анкет, то есть ${forecast.flow.sample_fraction}% проголосовавших (${number(forecast.flow.paper_voters)}). Если вечерние избиратели голосуют иначе на 5 п.п., итог дня сдвинется примерно на ${(forecast.flow.evening_share * 0.05).toFixed(1)} п.п.` : null,
     `<strong>Что не учтено.</strong> Пока есть данные за ${scope.days.length} дн. (${escapeHTML(scope.days.join(', '))}), последняя анкета: ${forecastMoment(scope.last_at)}. Оставшееся время и дни предполагаются такими же по структуре голосующих; когда придут новые анкеты, прогноз пересчитается сам. Электронное голосование опросом не охвачено (сценарии ниже).`,
   ];
-  $('#forecast-steps').innerHTML = steps.map(item => `<li>${item}</li>`).join('');
+  $('#forecast-steps').innerHTML = steps.filter(Boolean).map(item => `<li>${item}</li>`).join('');
   renderForecastHistory(forecast.history);
   $('#forecast-ages').innerHTML = forecast.ages.map(a => `<tr><td class="territory">${escapeHTML(a.age)}</td><td>${a.sample_share}%</td><td>${a.refusal_rate}%</td><td>${escapeHTML(a.leader)}</td><td>${a.leader_share}%</td></tr>`).join('');
   const deg = forecast.deg;
@@ -208,6 +209,22 @@ function markActiveBar() {
   });
 }
 function closeDetail() { activeDetail = null; $('#detail-drawer').hidden = true; document.body.classList.remove('drawer-open'); markActiveBar(); }
+function renderSwing(swing) {
+  const head = $('#swing-head'), body = $('#swing-body');
+  if (!swing) { head.innerHTML = ''; body.innerHTML = ''; return; }
+  head.innerHTML = `<tr><th class="sticky-col">Партия · итог 2021</th>${swing.okrugs.map(o => `<th>Округ ${escapeHTML(o.okrug)}<small>n = ${number(o.n)}</small></th>`).join('')}<th>Область<small>n = ${number(swing.region_n)}</small></th></tr>`;
+  const cell = c => {
+    const tip = c.y2021 === null ? 'в 2021 партии не было' : `2021: ${c.y2021}% · опрос: ${c.poll === null ? '—' : c.poll + '%'} (n = ${number(c.n)})`;
+    if (c.delta === null) return `<td class="heat" title="${escapeHTML(tip)}">—</td>`;
+    return `<td class="heat swing${c.significant ? ' sig' : ''}" data-delta="${c.delta}" title="${escapeHTML(tip)}">${fmtSigned(c.delta)}</td>`;
+  };
+  body.innerHTML = swing.rows.map(row => `<tr><th>${escapeHTML(row.label)}<small>2021: ${row.y2021 === null ? '—' : row.y2021 + '%'}</small></th>${row.cells.map(cell).join('')}${cell(row.region)}</tr>`).join('');
+  body.querySelectorAll('td.swing').forEach(el => {
+    const delta = Number(el.dataset.delta), level = Math.min(1, Math.abs(delta) / 12);
+    el.style.background = `rgba(${delta >= 0 ? '70,99,77' : '217,120,98'}, ${0.08 + 0.72 * level})`;
+    el.classList.toggle('heat-dark', level > 0.6);
+  });
+}
 function renderSummary(summary) {
   const cards = [
     ['Всего анкет',summary.total,'За выбранный период','accent'],
@@ -342,7 +359,7 @@ function renderFilters(data) {
 function render(data) {
   renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties,{kind:'party'});
   renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender'}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
-  renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderForecast(data.forecast, data.summary);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderForecast(data.forecast, data.summary);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;

@@ -9,7 +9,7 @@ import re
 from urllib.parse import unquote
 
 from app.main import (ANOMALY_HEADERS, OKRUGS, Settings, TIK_TO_OKRUG, connect, create_app, dashboard_snapshot,
-                      dashboard_detail, detect_anomalies, export_once, forecast_shares, parse_sheet_rows, read_anomaly_statuses, write_anomaly_status)
+                      BASELINE, baseline_shares, build_swing, dashboard_detail, detect_anomalies, export_once, forecast_shares, parse_sheet_rows, read_anomaly_statuses, territory_weights, write_anomaly_status)
 
 
 @pytest.fixture
@@ -809,3 +809,58 @@ def test_detail_endpoint_validation_and_scope(settings, monkeypatch):
         assert client.get("/api/dashboard/detail", params={**query, "focus": "КПРФ"}).json()["focus"] == "КПРФ"
         body = client.get("/api/dashboard/detail", params={**query, "day": "2026-09-15"}).json()
         assert body["metrics"][0]["value"] == "0"
+
+
+def test_baseline_2021_is_loaded_and_renormalised():
+    assert BASELINE and len(BASELINE["okrugs"]) == 12
+    region = baseline_shares()
+    assert abs(sum(region.values()) - 100) < 0.5
+    assert "Партия прямой демократии" not in region and "Яблоко" not in region
+    assert region["Единая Россия"] > region["КПРФ"] > region["Новые люди"]
+    assert baseline_shares("128")["Новые люди"] > baseline_shares("123")["Новые люди"]
+
+
+def test_territory_weights_follow_okrug_electorate(settings):
+    weights = territory_weights(settings)
+    assert len(weights) == 56 and abs(sum(weights.values()) - 1) < 1e-9
+    voters = {okrug: entry["voters"] for okrug, entry in BASELINE["okrugs"].items()}
+    total = sum(voters.values())
+    for okrug, tiks in OKRUGS.items():
+        assert abs(sum(weights[t] for t in tiks) - voters[okrug] / total) < 1e-9
+
+
+def test_forecast_uses_weights_and_reports_2021_and_flow(settings):
+    rows = shift_rows(settings, 60, start="2026-09-18T09:00:00+00:00", step=600, day="2026-09-18")
+    forecast = forecast_shares(parse_sheet_rows(rows), territory_weights(settings))
+    first = forecast["rows"][0]
+    assert first["y2021"] == baseline_shares()[first["label"]]
+    assert next(r for r in forecast["rows"] if r["label"] == "Партия прямой демократии")["y2021"] is None
+    flow = forecast["flow"]
+    assert flow["day"] == "2026-09-18" and flow["voted_by_share"] == 73.9 and flow["evening_share"] == 26.1
+    assert flow["anket_by_as_of"] == 60 - sum(1 for r in rows if r[1] >= "2026-09-18T15:00:00+00:00")
+    assert flow["sample_fraction"] == round(flow["anket_by_as_of"] * 100 / 730820, 2)
+    assert forecast_shares(parse_sheet_rows(shift_rows(settings, 60)), territory_weights(settings))["flow"] is None
+
+
+def test_swing_compares_poll_with_2021_by_okrug(settings):
+    rows = mk_rows(settings, [(BAL, 50, FOCUS, "Мужской", "25–34", "a"), (BAL, 50, "Единая Россия", "Мужской", "25–34", "b"),
+                              (DMI, 5, FOCUS, "Мужской", "25–34", "c")])
+    snap = dashboard_snapshot(rows, settings, requested_day="2026-09-16")
+    swing = snap["swing"]
+    assert swing["year"] == 2021 and len(swing["okrugs"]) == 12
+    row = next(r for r in swing["rows"] if r["label"] == FOCUS)
+    index = sorted(OKRUGS).index(TIK_TO_OKRUG[BAL])
+    cell = row["cells"][index]
+    assert cell["poll"] == 50.0 and cell["delta"] == round(50 - cell["y2021"], 1) and cell["significant"] is True
+    small = row["cells"][sorted(OKRUGS).index(TIK_TO_OKRUG[DMI])]
+    assert small["n"] == 5 and small["delta"] is None
+    assert swing["rows"][0]["y2021"] >= swing["rows"][1]["y2021"]
+
+
+def test_okrug_analysis_has_2021_comparison(settings):
+    rows = mk_rows(settings, [(BAL, 60, FOCUS, "Мужской", "25–34", "a"), (BAL, 60, "Единая Россия", "Мужской", "45–60", "b")])
+    payload = detail(settings, rows, "okrug", TIK_TO_OKRUG[BAL])
+    section = next(sec for sec in payload["sections"] if sec["title"] == "К итогам 2021")
+    assert any(r[0]["t"] == FOCUS and r[4]["t"] == "значимо выше" for r in section["tables"][0]["rows"])
+    assert "К 2021 году" in texts(payload, "Позиция «Новые люди»")
+    assert not any(sec["title"] == "К итогам 2021" for sec in detail(settings, rows, "age", "25–34")["sections"])

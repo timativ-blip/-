@@ -498,6 +498,56 @@ DEG_CONTEXT = {"source": "РИА Новости", "as_of": "18:00 МСК 18.09.2
 _FORECAST_CACHE = {}
 
 
+BASELINE_FILE = ROOT / "app" / "baseline_2021.json"
+BASELINE = json.loads(BASELINE_FILE.read_text(encoding="utf-8")) if BASELINE_FILE.exists() else None
+MSK = timezone(timedelta(hours=3))
+# Dated turnout snapshots from news reports (day 1 of voting), used to describe how much of the flow the poll saw.
+FLOW_CONTEXT = {"day": "2026-09-18", "as_of": "18:00", "as_of_hour": 18, "paper_turnout_as_of": 13.47,
+                "paper_turnout_close": 18.23, "paper_voters_as_of": 730820, "source": "РИА Новости, 360.ru"}
+
+
+def baseline_shares(okrug=None):
+    """2021 party-list shares, renormalised over the parties the poll offers (an okrug or the whole area)."""
+    if not BASELINE:
+        return {}
+    entries = [BASELINE["okrugs"][okrug]] if okrug else list(BASELINE["okrugs"].values())
+    votes = Counter()
+    for entry in entries:
+        for label in FORECAST_PARTIES:
+            votes[label] += entry["votes"].get(label, 0)
+    total = sum(votes.values())
+    return {label: round(count * 100 / total, 2) for label, count in votes.items() if count} if total else {}
+
+
+def territory_weights(settings):
+    """Weight of every TIK: its okrug's 2021 electorate, split between the okrug's TIKs by their UIK count."""
+    uiks = Counter(p["tik"] for p in settings.precincts if p.get("tik"))
+    if not BASELINE:
+        return dict(uiks)
+    okrug_uiks = Counter()
+    for tik, count in uiks.items():
+        okrug_uiks[TIK_TO_OKRUG.get(tik, "")] += count
+    voters = {okrug: entry["voters"] for okrug, entry in BASELINE["okrugs"].items()}
+    total = sum(voters.values())
+    return {tik: voters.get(TIK_TO_OKRUG.get(tik), 0) / total * count / okrug_uiks[TIK_TO_OKRUG.get(tik, "")]
+            for tik, count in uiks.items()}
+
+
+def _flow_snapshot(rows):
+    """How much of the first day's flow at polling stations the poll could have seen."""
+    context = FLOW_CONTEXT
+    moments = [m for m in (parse_moment(r["created_at"]) for r in rows if r["day"] == context["day"]) if m]
+    if not moments:
+        return None
+    voted_share = context["paper_turnout_as_of"] / context["paper_turnout_close"] * 100
+    by_cutoff = sum(1 for m in moments if m.astimezone(MSK).hour < context["as_of_hour"])
+    last = max(moments).astimezone(MSK)
+    return {"day": context["day"], "as_of": context["as_of"], "source": context["source"],
+            "voted_by_share": round(voted_share, 1), "evening_share": round(100 - voted_share, 1),
+            "paper_voters": context["paper_voters_as_of"], "anket_by_as_of": by_cutoff,
+            "sample_fraction": round(by_cutoff * 100 / context["paper_voters_as_of"], 2), "last_at": last.isoformat()}
+
+
 def _blend(counts, prior, strength):
     total = sum(counts)
     return [(counts[i] + strength * prior[i]) / (total + strength) for i in range(len(prior))]
@@ -519,7 +569,7 @@ def _prepare_forecast_rows(rows):
     return prepared
 
 
-def _forecast_core(prepared, uik_counts, detail=False):
+def _forecast_core(prepared, weights, detail=False):
     """One pass of the estimate. Returns vectors over FORECAST_PARTIES (fractions) or None without data."""
     size, count_parties = len(FORECAST_CATEGORIES), len(FORECAST_PARTIES)
     overall = [0] * size
@@ -580,7 +630,7 @@ def _forecast_core(prepared, uik_counts, detail=False):
             for i in range(count_parties)]
 
     final, covered, tiks_with_data = with_refusals, 0.0, 0
-    if uik_counts:
+    if weights:
         vectors = {tik: [by_tik[tik][i] + alloc_tik[tik][i] for i in range(count_parties)]
                    for tik in set(by_tik) | set(alloc_tik)}
         okrug_totals = defaultdict(lambda: [0.0] * count_parties)
@@ -589,9 +639,9 @@ def _forecast_core(prepared, uik_counts, detail=False):
                 for i in range(count_parties):
                     okrug_totals[TIK_TO_OKRUG[tik]][i] += vector[i]
         okrug_share = {okrug: _blend(vector, with_refusals, SHRINK_OKRUG) for okrug, vector in okrug_totals.items()}
-        weight_total = sum(uik_counts.values())
+        weight_total = sum(weights.values())
         accumulated = [0.0] * count_parties
-        for tik, weight in uik_counts.items():
+        for tik, weight in weights.items():
             vector = vectors.get(tik)
             parent = okrug_share.get(TIK_TO_OKRUG.get(tik, ""), with_refusals)
             if vector and sum(vector):
@@ -612,7 +662,7 @@ def _forecast_core(prepared, uik_counts, detail=False):
     return result
 
 
-def forecast_shares(rows, uik_counts=None):
+def forecast_shares(rows, weights=None):
     """Forecast of the final split among valid ballots, from all survey rows (independent of dashboard filters).
 
     Steps: respondents -> refusers spread over okrug x gender x age cells -> territories weighted by their
@@ -622,10 +672,10 @@ def forecast_shares(rows, uik_counts=None):
     """
     prepared = _prepare_forecast_rows(rows)
     fingerprint = (hash(tuple((t[0], t[2], t[3], t[4], t[5], t[6]) for t in prepared)),
-                   hash(tuple(sorted((uik_counts or {}).items()))))
+                   hash(tuple(sorted((weights or {}).items()))))
     if fingerprint in _FORECAST_CACHE:
         return _FORECAST_CACHE[fingerprint]
-    full = _forecast_core(prepared, uik_counts, detail=True)
+    full = _forecast_core(prepared, weights, detail=True)
     if full is None:
         return None
     parties, count_parties = FORECAST_PARTIES, len(FORECAST_PARTIES)
@@ -635,7 +685,7 @@ def forecast_shares(rows, uik_counts=None):
         groups.setdefault(item[5], zlib.crc32(item[5].encode()) % JACKKNIFE_GROUPS)
     replicates = []
     for group in sorted(set(groups.values())):
-        part = _forecast_core([item for item in prepared if groups[item[5]] != group], uik_counts)
+        part = _forecast_core([item for item in prepared if groups[item[5]] != group], weights)
         if part:
             replicates.append(part["final"])
     # Never below plain sampling error (which is also the fallback when there are too few UIK groups).
@@ -654,12 +704,13 @@ def forecast_shares(rows, uik_counts=None):
     history = []
     for fraction in HISTORY_FRACTIONS:
         size = max(1, math.ceil(len(ordered) * fraction))
-        part = full if fraction == 1.0 else _forecast_core(ordered[:size], uik_counts)
+        part = full if fraction == 1.0 else _forecast_core(ordered[:size], weights)
         if part:
             moment = ordered[size - 1][6]
             history.append({"fraction": fraction, "n": size, "at": moment.isoformat() if moment else "",
                             "final": [round(value * 100, 1) for value in part["final"]]})
 
+    baseline_2021 = baseline_shares()
     order = sorted(range(count_parties), key=lambda i: -full["final"][i])
     trend_point = next((point for point in history if point["fraction"] == 0.7), None)
     rows_out = []
@@ -670,6 +721,7 @@ def forecast_shares(rows, uik_counts=None):
             "label": parties[i], "answered": round(full["raw"][i] * 100, 1),
             "with_refusals": round(full["with_refusals"][i] * 100, 1), "forecast": round(forecast, 1),
             "delta": round(forecast - full["raw"][i] * 100, 1), "margin": round(margin, 1),
+            "y2021": baseline_2021.get(parties[i]),
             "trend": round(forecast - trend_point["final"][i], 1) if trend_point else None})
 
     def group_share(ages):
@@ -701,13 +753,14 @@ def forecast_shares(rows, uik_counts=None):
     result = {
         "rows": rows_out,
         "scope": {"anket": len(prepared), "respondents": full["valid"], "refusers": full["refusers"],
-                  "tiks_with_data": full["tiks_with_data"], "tiks_total": len(uik_counts or {}),
+                  "tiks_with_data": full["tiks_with_data"], "tiks_total": len(weights or {}),
                   "covered_share": round(full["covered"] * 100), "days": sorted({r["day"] for r in rows if r["day"]}),
                   "last_at": max(moments).isoformat() if moments else ""},
         "history": {"points": [{k: v for k, v in point.items() if k != "final"} for point in history],
                     "series": [{"label": parties[i], "values": [point["final"][i] for point in history]}
                                for i in order[:4]]},
         "ages": ages,
+        "flow": _flow_snapshot(rows),
         "deg": {**DEG_CONTEXT, "scenarios": scenarios},
     }
     if len(_FORECAST_CACHE) >= 4:
@@ -1317,9 +1370,33 @@ def group_analysis(scope, kind, key, focus, settings, forecast):
     mix_rows = [[_cell(_dim_label(dim, raw)), _cell(DIM_TITLES[dim]), _cell(f"{here:.1f}%"), _cell(f"{there:.1f}%"), _cell(_pp(diff), "up" if diff > 0 else "down")]
                 for _, dim, raw, here, there, diff in sorted(mixes, reverse=True)[:6] if abs(diff) >= 5]
 
+    since_2021 = None
+    if kind == "okrug" and BASELINE and key in BASELINE["okrugs"] and len(named_subset) >= DETAIL_MIN_N:
+        reference = baseline_shares(key)
+        since_rows = []
+        for name in top:
+            hits, now = counts_here[name], counts_here[name] * 100 / len(named_subset)
+            ref = reference.get(name)
+            if ref is None:
+                since_rows.append([_cell(name, "focus" if name == focus else ""), _cell("нет"), _cell(f"{now:.1f}%", bar=now), _cell("—"), _cell("в 2021 не участвовала", "muted")])
+                continue
+            low, high = _wilson(hits, len(named_subset))
+            outside = not (low * 100 <= ref <= high * 100)
+            cls = ("up" if now > ref else "down") if outside else ""
+            verdict = ("значимо выше" if now > ref else "значимо ниже") if outside else "в пределах погрешности"
+            since_rows.append([_cell(name, "focus" if name == focus else ""), _cell(f"{ref:.1f}%"), _cell(f"{now:.1f}%", bar=now), _cell(_pp(now - ref), cls), _cell(verdict, cls)])
+            if name == focus:
+                position.append(_find("notable" if outside else "info",
+                                      f"К 2021 году: «{focus}» было {ref:.1f}%, в опросе {now:.1f}% ({_pp(now - ref)}, "
+                                      + ("значимо)." if outside else "в пределах погрешности).")))
+        since_2021 = _table("Опрос против итогов 2021 в этом округе", ["Партия", "2021", "Опрос", "Разница", "Вывод"], since_rows,
+                            "2021 — итоги партийных списков (ЦИК), пересчитанные на те же партии; список партий и способ голосования отличаются, сравнение ориентировочное.")
+
     sections = [_section("Надёжность", reliability),
                 _section("Партии в группе и вне её", party_findings, [_table("Расклад среди назвавших партию", ["Партия", "В группе", "Вне группы", "Разница", "Вывод"], party_rows)]),
                 _section(f"Позиция «{focus}»", position)]
+    if since_2021:
+        sections.append(_section("К итогам 2021", tables=[since_2021]))
     if mix_rows:
         sections.append(_section("Чем отличается состав группы", tables=[_table("Заметные отличия состава от области в целом", ["Категория", "Срез", "В группе", "В области", "Разница"], mix_rows)]))
     if reserve:
@@ -1340,7 +1417,7 @@ def dashboard_detail(values, settings, kind, key, focus=DEFAULT_FOCUS, requested
     rows = parse_sheet_rows(values)
     _dates, _day, _day_rows, scope = scope_rows(rows, settings, requested_day, requested_okrug,
                                                  requested_tik, requested_precinct)
-    forecast = forecast_shares(rows, Counter(p["tik"] for p in settings.precincts if p.get("tik")))
+    forecast = forecast_shares(rows, territory_weights(settings))
     role = ""
     if kind == "party":
         if key == focus:
@@ -1357,6 +1434,33 @@ def dashboard_detail(values, settings, kind, key, focus=DEFAULT_FOCUS, requested
         role = "Группа"
     return {"kind": kind, "key": key, "focus": focus, "title": title, "role": role,
             "subtitle": f"В выбранной области: {_fmt_int(len(scope))} анкет", **body}
+
+
+def _swing_cell(hits, n, reference):
+    cell = {"n": n, "y2021": reference, "poll": _share(hits, n) if n else None, "delta": None, "significant": False}
+    if n >= DETAIL_MIN_N and reference is not None:
+        low, high = _wilson(hits, n)
+        cell["delta"] = round(hits * 100 / n - reference, 1)
+        cell["significant"] = not (low * 100 <= reference <= high * 100)
+    return cell
+
+
+def build_swing(okrug_rows):
+    """Poll share minus the 2021 result, for each party and okrug (both among the same parties)."""
+    if not BASELINE:
+        return None
+    okrug_ids = sorted(OKRUGS)
+    named = {o: Counter(r["answer"] for r in okrug_rows.get(o, []) if r["answer"] in FORECAST_PARTIES) for o in okrug_ids}
+    region = sum(named.values(), Counter())
+    region_ref = baseline_shares()
+    rows = []
+    for label in FORECAST_PARTIES:
+        cells = [_swing_cell(named[o][label], sum(named[o].values()), baseline_shares(o).get(label)) for o in okrug_ids]
+        rows.append({"label": label, "y2021": region_ref.get(label), "cells": cells,
+                     "region": _swing_cell(region[label], sum(region.values()), region_ref.get(label))})
+    rows.sort(key=lambda r: (r["y2021"] is None, -(r["y2021"] or 0)))
+    return {"year": BASELINE["year"], "okrugs": [{"okrug": o, "n": sum(named[o].values())} for o in okrug_ids], "rows": rows,
+            "region_n": sum(region.values())}
 
 
 def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
@@ -1565,7 +1669,8 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
                   "percent": round(ages[label] * 100 / total, 1) if total else 0} for label in AGES],
         "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
         "new_people_by_okrug": new_people_by_okrug, "new_people_by_age": new_people_by_age, "party_okrug": party_okrug, "party_age": party_age,
-        "forecast": forecast_shares(rows, Counter(p["tik"] for p in settings.precincts if p.get("tik"))),
+        "swing": build_swing(okrug_rows),
+        "forecast": forecast_shares(rows, territory_weights(settings)),
         "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,
