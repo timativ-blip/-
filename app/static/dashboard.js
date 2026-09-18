@@ -6,7 +6,7 @@ let allInterviewers = [];
 let interviewersTotal = 0;
 let anomalyPayload = null;
 let lastAgeHeat = null;
-let previousInsightTotal = null;
+let activeDetail = null;
 let showClosedAnomalies = false;
 let anomalyRenderPending = false;
 const interviewerSort = {key:'', dir:'desc'};
@@ -37,11 +37,11 @@ function showLogin(message = '') {
 function showDashboard() { $('#login-view').hidden = true; $('#dashboard').hidden = false; }
 function status(kind, text) { $('#live-status').className = `live ${kind}`; $('#live-status span').textContent = text; }
 
-function renderColumns(target, items, {compact = false} = {}) {
+function renderColumns(target, items, {compact = false, kind = '', keyOf = item => item.label} = {}) {
   const max = Math.max(1, ...items.map(x => x.count));
   const maxHeight = compact ? 90 : 150;
   const box = $(target);
-  box.innerHTML = `<div class="columns${compact ? ' compact' : ''}">${items.map(item => `<div class="column"><div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="column-bar"></div><div class="column-label" title="${escapeHTML(item.title || item.label)}">${escapeHTML(item.label)}</div></div>`).join('')}</div>`;
+  box.innerHTML = `<div class="columns${compact ? ' compact' : ''}">${items.map(item => `<div class="column"${kind ? ` data-kind="${kind}" data-key="${escapeHTML(keyOf(item))}" role="button" tabindex="0"` : ''}><div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="column-bar"></div><div class="column-label" title="${escapeHTML(item.title || item.label)}">${escapeHTML(item.label)}</div></div>`).join('')}</div>`;
   // CSP (style-src 'self', no unsafe-inline) drops style="" written via innerHTML;
   // assigning through the DOM style API below is unaffected and actually renders the bar height.
   box.querySelectorAll('.column-bar').forEach((el, index) => {
@@ -50,7 +50,7 @@ function renderColumns(target, items, {compact = false} = {}) {
   });
 }
 function renderNewPeopleAge(groups) {
-  renderColumns('#newpeople-age-chart', groups.map(g => ({...g, title: `${g.label}: ${number(g.count)} из ${number(g.total)} анкет`})));
+  renderColumns('#newpeople-age-chart', groups.map(g => ({...g, title: `${g.label}: ${number(g.count)} из ${number(g.total)} анкет`})), {kind:'age'});
   const votes = groups.reduce((sum, g) => sum + g.count, 0);
   const enough = groups.filter(g => g.total >= 20);
   const byRate = [...enough].sort((a, b) => b.percent - a.percent)[0];
@@ -150,20 +150,52 @@ function renderAgeHeatmap(heat) {
   });
   $('#ageheat-note').textContent = validOnly ? 'Доля внутри возрастной группы среди ответивших партии (без отказов и испорченных бюллетеней).' : 'Доля внутри возрастной группы от всех её анкет, включая отказы. Яркость — относительно максимума в строке.';
 }
-function renderInsights(items, summary, generatedAt) {
-  const sections = [];
-  items.forEach(item => {
-    let section = sections.find(x => x.name === item.section);
-    if (!section) { section = {name: item.section, items: []}; sections.push(section); }
-    section.items.push(item);
-  });
-  $('#insights').innerHTML = sections.map(section => `<article class="insight-card"><h3>${escapeHTML(section.name)}</h3><ul>${section.items.map(item => `<li class="lvl-${escapeHTML(item.level)}">${escapeHTML(item.text)}</li>`).join('')}</ul></article>`).join('');
-  const scopeKey = [filters.day, filters.okrug, filters.tik, filters.precinct].join('|');
-  const delta = previousInsightTotal && previousInsightTotal.key === scopeKey ? summary.total - previousInsightTotal.total : 0;
-  previousInsightTotal = {key: scopeKey, total: summary.total};
-  const time = new Date(generatedAt).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
-  $('#insights-meta').textContent = `Обновлено в ${time}` + (delta > 0 ? ` · +${number(delta)} анкет с прошлого обновления` : '');
+function detailQuery(kind, key) {
+  const query = new URLSearchParams({kind, key});
+  if (filters.day) query.set('day', filters.day);
+  if (filters.okrug) query.set('okrug', filters.okrug);
+  if (filters.tik) query.set('tik', filters.tik);
+  if (filters.precinct) query.set('precinct', filters.precinct);
+  return query;
 }
+function detailCard(anchor) {
+  let card = $('#detail-card');
+  if (!card) { card = document.createElement('section'); card.id = 'detail-card'; card.className = 'panel detail-card'; }
+  if (anchor) {
+    (anchor.closest('.grid.two') || anchor.closest('.panel')).after(card);
+    card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+  return card;
+}
+function renderDetail(data, anchor) {
+  const card = detailCard(anchor);
+  const metrics = data.metrics.map(m => `<div class="detail-metric"><span>${escapeHTML(m.label)}</span><strong>${escapeHTML(m.value)}</strong></div>`).join('');
+  const findings = data.findings.map(f => `<li class="lvl-${escapeHTML(f.level)}">${escapeHTML(f.text)}</li>`).join('');
+  const breakdowns = data.breakdowns.map(b => {
+    const scale = Math.max(1, ...b.rows.flatMap(r => [r.small ? 0 : r.percent, r.baseline ?? 0]));
+    const rows = b.rows.map(r => `<div class="brow${r.small ? ' small' : ''}"><span class="brow-label" title="${escapeHTML(r.label)}">${escapeHTML(r.label)}</span><div class="btrack" title="${r.baseline != null ? `в целом по области: ${r.baseline}%` : ""}"><i data-w="${r.small ? 0 : r.percent / scale * 100}"></i>${r.baseline != null ? `<b data-w="${r.baseline / scale * 100}"></b>` : ''}</div><span class="brow-value">${r.small ? `мало данных (${r.total})` : `${r.percent}%`}</span></div>`).join('');
+    return `<article class="breakdown"><h3>${escapeHTML(b.title)}</h3><p class="panel-note">${escapeHTML(b.note)}</p>${rows}</article>`;
+  }).join('');
+  card.innerHTML = `<header><div><p class="kicker">АНАЛИЗ ГРАФЫ</p><h2>${escapeHTML(data.title)}</h2><p class="subtle">${escapeHTML(data.subtitle)} · пересчитывается вместе с данными</p></div><button id="detail-close" class="ghost-button" type="button">Закрыть</button></header><div class="detail-metrics">${metrics}</div><ul class="findings">${findings}</ul><div class="detail-grid">${breakdowns}</div>`;
+  card.querySelectorAll('.btrack i').forEach(el => { el.style.width = el.dataset.w + '%'; });
+  card.querySelectorAll('.btrack b').forEach(el => { el.style.left = `calc(${el.dataset.w}% - 1px)`; });
+}
+async function refreshDetail(anchor) {
+  if (!activeDetail) return;
+  const {kind, key} = activeDetail;
+  try {
+    const data = await request('/api/dashboard/detail?' + detailQuery(kind, key));
+    if (activeDetail && activeDetail.kind === kind && activeDetail.key === key) renderDetail(data, anchor);
+  } catch (error) {
+    if (anchor) { const card = detailCard(anchor); card.innerHTML = `<p class="error">${escapeHTML(error.message)}</p>`; }
+  }
+}
+function markActiveBar() {
+  document.querySelectorAll('[data-kind][data-key]').forEach(el => {
+    el.classList.toggle('selected', Boolean(activeDetail) && el.dataset.kind === activeDetail.kind && el.dataset.key === activeDetail.key);
+  });
+}
+function closeDetail() { activeDetail = null; $('#detail-card')?.remove(); markActiveBar(); }
 function renderSummary(summary) {
   const cards = [
     ['Всего анкет',summary.total,'За выбранный период','accent'],
@@ -178,7 +210,7 @@ function renderSummary(summary) {
 function renderHours(items) {
   const max = Math.max(1, ...items.map(x => x.count));
   const box = $('#hours-chart');
-  box.innerHTML = items.map(item => `<div class="hour"><b>${item.count || ''}</b><i></i><span>${escapeHTML(item.hour.slice(0,2))}</span></div>`).join('');
+  box.innerHTML = items.map(item => `<div class="hour"${item.count ? ` data-kind="hour" data-key="${escapeHTML(item.hour.slice(0,2))}" role="button" tabindex="0"` : ''}><b>${item.count || ''}</b><i></i><span>${escapeHTML(item.hour.slice(0,2))}</span></div>`).join('');
   box.querySelectorAll('.hour i').forEach((el, index) => { el.style.height = Math.max(3, items[index].count / max * 145) + 'px'; });
 }
 function renderGeo(data) {
@@ -296,12 +328,13 @@ function renderFilters(data) {
   $('#precinct').disabled = !filters.tik;
 }
 function render(data) {
-  renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties);
-  renderColumns('#gender-chart',data.genders,{compact:true}); renderColumns('#age-chart',data.ages,{compact:true}); renderHours(data.hours);
-  renderColumns('#newpeople-chart',data.new_people_by_okrug); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderForecast(data.forecast, data.summary); renderInsights(data.insights, data.summary, data.generated_at);
+  renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties,{kind:'party'});
+  renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender'}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderForecast(data.forecast, data.summary);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;
+  markActiveBar(); void refreshDetail();
   $('#updated-at').textContent = 'Обновлено в ' + new Date(data.generated_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 async function load() {
@@ -346,6 +379,20 @@ document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', (
   $('#tab-forecast').hidden = tab.dataset.tab !== 'forecast';
 }));
 $('#age-heat-valid').addEventListener('change', () => { if (lastAgeHeat) renderAgeHeatmap(lastAgeHeat); });
+document.addEventListener('click', event => {
+  const bar = event.target.closest('[data-kind][data-key]');
+  if (bar) {
+    const same = activeDetail && activeDetail.kind === bar.dataset.kind && activeDetail.key === bar.dataset.key;
+    if (same) { closeDetail(); return; }
+    activeDetail = {kind: bar.dataset.kind, key: bar.dataset.key};
+    markActiveBar();
+    void refreshDetail(bar);
+  } else if (event.target.closest('#detail-close')) closeDetail();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && activeDetail) closeDetail();
+  else if ((event.key === 'Enter' || event.key === ' ') && event.target.matches?.('[data-kind][data-key]')) { event.preventDefault(); event.target.click(); }
+});
 $('#anomaly-show-closed').addEventListener('change', event => { showClosedAnomalies = event.target.checked; renderAnomalies(); });
 $('#anomalies').addEventListener('focusout', () => setTimeout(() => { if (anomalyRenderPending && !anomalyEditing()) renderAnomalies(); }, 0));
 $('#anomalies').addEventListener('click', async event => {

@@ -9,7 +9,7 @@ import re
 from urllib.parse import unquote
 
 from app.main import (ANOMALY_HEADERS, OKRUGS, Settings, TIK_TO_OKRUG, connect, create_app, dashboard_snapshot,
-                      detect_anomalies, export_once, forecast_shares, parse_sheet_rows, read_anomaly_statuses, write_anomaly_status)
+                      dashboard_detail, detect_anomalies, export_once, forecast_shares, parse_sheet_rows, read_anomaly_statuses, write_anomaly_status)
 
 
 @pytest.fixture
@@ -698,43 +698,74 @@ def test_snapshot_has_forecast_and_age_heatmap(settings):
     assert other_day["forecast"]["rows"] == snap["forecast"]["rows"]
 
 
-def insight_sections(snapshot):
-    result = {}
-    for item in snapshot["insights"]:
-        result.setdefault(item["section"], []).append(item)
-    return result
+def detail(settings, rows, kind, key, **scope):
+    return dashboard_detail(rows, settings, kind, key, scope.pop("day", "2026-09-16"), **scope)
 
 
-def test_insights_for_empty_scope(settings):
-    snap = dashboard_snapshot([], settings)
-    assert len(snap["insights"]) == 1 and "пока нет анкет" in snap["insights"][0]["text"]
+def breakdown(payload, title):
+    return next(b for b in payload["breakdowns"] if b["title"] == title)
 
 
-def test_insights_say_too_little_data_for_small_samples(settings):
-    snap = dashboard_snapshot(shift_rows(settings, 5), settings, requested_day="2026-09-16")
-    sections = insight_sections(snap)
-    assert any("мало данных" in i["text"] for i in sections["Партии"])
-    assert "Прогноз" not in sections
+def test_refusal_detail_shows_who_refuses(settings):
+    rows = (shift_rows(settings, 60, answer=lambda i: "Отказался отвечать" if i % 2 == 0 else "КПРФ",
+                       age=lambda i: "61+" if i % 2 == 0 else "25–34")
+            + shift_rows(settings, 40, shift="s2", name="Пётр", answer="КПРФ", age="25–34"))
+    payload = detail(settings, rows, "party", "Отказался отвечать")
+    assert payload["kind"] == "party" and payload["metrics"][0]["value"] == "30"
+    ages = {r["label"]: r for r in breakdown(payload, "По возрасту")["rows"]}
+    assert ages["61+"]["percent"] == 100 and ages["25–34"]["percent"] == 0
+    assert any("61+" in f["text"] and "чаще всего" in f["text"] for f in payload["findings"])
+    people = breakdown(payload, "Интервьюеры с наибольшей долей отказов")["rows"]
+    assert people[0]["label"] == "Тестов Иван" and people[0]["percent"] == 50
 
 
-def test_insights_cover_every_area_and_flag_high_refusals(settings):
-    rows = (shift_rows(settings, 120, answer=lambda i: "Отказался отвечать" if i % 2 else PARTY_CYCLE[i % 3])
-            + shift_rows(settings, 20, shift="s2", name="Пётр", start="2026-09-16T06:00:00+00:00", step=200))
-    snap = dashboard_snapshot(rows, settings, requested_day="2026-09-16")
-    sections = insight_sections(snap)
-    for name in ("Итоги", "Партии", "Прогноз", "Демография", "Территории", "Новые люди", "Поток", "Интервьюеры и качество"):
-        assert name in sections, name
-    assert any(i["level"] == "warning" and "отказов" in i["text"] for i in sections["Итоги"])
-    leader = next(p["label"] for p in snap["parties"] if p["label"] not in ("Отказался отвечать", "Испортил бюллетень"))
-    assert any("лидирует " + leader in i["text"] for i in sections["Партии"])
-    assert all(i["text"] and i["level"] in ("info", "notable", "warning") for i in snap["insights"])
+def test_party_detail_rank_forecast_and_small_sample(settings):
+    rows = shift_rows(settings, 120)
+    payload = detail(settings, rows, "party", "Единая Россия")
+    text = " ".join(f["text"] for f in payload["findings"])
+    assert "-е место из" in text and "Прогноз по всем данным" in text
+    small = detail(settings, shift_rows(settings, 6), "party", "Единая Россия")
+    assert any("мало" in f["text"] for f in small["findings"])
+    assert detail(settings, shift_rows(settings, 6), "party", "Родина")["findings"][0]["text"].startswith("Таких анкет")
 
 
-def test_insights_mention_open_anomalies_and_follow_statuses(settings):
-    rows = shift_rows(settings, 8, step=5)
-    text = " ".join(i["text"] for i in dashboard_snapshot(rows, settings, requested_day="2026-09-16")["insights"])
-    assert "Открыто аномалий: 1" in text
-    anomaly = dashboard_snapshot(rows, settings, requested_day="2026-09-16")["anomalies"]["items"][0]
-    closed = dashboard_snapshot(rows, settings, requested_day="2026-09-16",
-                                statuses={anomaly["id"]: {"status": "resolved", "note": "", "updated_at": "x"}})
-    assert "Открытых аномалий нет" in " ".join(i["text"] for i in closed["insights"])
+def test_group_detail_compares_with_whole_area(settings):
+    rows = (shift_rows(settings, 80, answer="КПРФ", age="61+")
+            + shift_rows(settings, 80, shift="s2", answer="Единая Россия", age="25–34"))
+    payload = detail(settings, rows, "age", "61+")
+    assert payload["title"] == "Возраст 61+" and payload["metrics"][0]["value"] == "80"
+    parties = {r["label"]: r for r in breakdown(payload, "Партии среди назвавших партию")["rows"]}
+    assert parties["КПРФ"]["percent"] == 100 and parties["КПРФ"]["baseline"] == 50
+    assert any("«КПРФ» здесь 100%" in f["text"] for f in payload["findings"])
+    assert not any(b["title"] == "Возрастной состав" for b in payload["breakdowns"])
+    assert any(b["title"] == "Состав по полу" for b in payload["breakdowns"])
+
+
+def test_okrug_hour_and_gender_details(settings):
+    rows = shift_rows(settings, 60)
+    okrug = TIK_TO_OKRUG[settings.precincts[0]["tik"]]
+    assert detail(settings, rows, "okrug", okrug)["metrics"][0]["value"] == "60"
+    assert detail(settings, rows, "okrug", "999" if "999" not in OKRUGS else "118")["title"].startswith("Округ")
+    hour = detail(settings, rows, "hour", "10")
+    assert hour["title"] == "Час 10:00–10:59" and int(hour["metrics"][0]["value"].replace("\u00a0", "")) > 0
+    assert detail(settings, rows, "gender", "Женский")["title"] == "Женщины"
+    empty = detail(settings, [], "gender", "Мужской")
+    assert empty["findings"][0]["text"].startswith("Анкет в этой группе")
+
+
+def test_detail_endpoint_validation_and_scope(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    rows = shift_rows(settings, 60)
+    monkeypatch.setattr("app.main.read_sheet", lambda _: rows)
+    with TestClient(create_app(settings)) as client:
+        query = {"kind": "party", "key": "КПРФ", "day": "2026-09-16"}
+        assert client.get("/api/dashboard/detail", params=query).status_code == 401
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        assert client.get("/api/dashboard/detail", params=query).status_code == 200
+        assert client.get("/api/dashboard/detail", params={**query, "kind": "nope"}).status_code == 422
+        assert client.get("/api/dashboard/detail", params={**query, "key": "Яблоко"}).status_code == 422
+        assert client.get("/api/dashboard/detail", params={**query, "kind": "age", "key": "17"}).status_code == 422
+        assert client.get("/api/dashboard/detail", params={**query, "okrug": "999"}).status_code == 422
+        body = client.get("/api/dashboard/detail", params={**query, "day": "2026-09-15"}).json()
+        assert body["metrics"][0]["value"] == "0"
