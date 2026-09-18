@@ -484,6 +484,85 @@ def write_anomaly_status(settings, record, session=None):
     _google_call(session, run)
 
 
+FORECAST_DEFF = 2.0
+FORECAST_TILT = 1.25
+FORECAST_SHRINK_MARGIN = 30
+FORECAST_SHRINK_CELL = 15
+
+
+def _blend(counts, prior, strength):
+    total = sum(counts)
+    return [(counts[i] + strength * prior[i]) / (total + strength) for i in range(len(prior))]
+
+
+def forecast_shares(rows):
+    """Spread "refused" surveys over the parties.
+
+    A refuser is assumed to vote like respondents in the same okrug x gender x age cell. Sparse cells
+    are pulled toward what the okrug and the demographic group say separately, then toward the overall
+    split. The band combines sampling error (with a cluster design effect) and sensitivity to refusers
+    having FORECAST_TILT times higher or lower odds for a party than their cell suggests.
+    """
+    parties = [label for pid, label in PARTIES if pid not in ("2", "spoiled", "refused")]
+    categories = parties + ["Испортил бюллетень"]
+    position = {label: i for i, label in enumerate(categories)}
+    size = len(categories)
+
+    overall = [0] * size
+    by_demo = defaultdict(lambda: [0] * size)
+    by_okrug = defaultdict(lambda: [0] * size)
+    by_cell = defaultdict(lambda: [0] * size)
+    refusers = Counter()
+    for row in rows:
+        okrug, gender, age = TIK_TO_OKRUG.get(row["tik"], ""), row["gender"], row["age"]
+        if row["answer"] in position:
+            i = position[row["answer"]]
+            overall[i] += 1
+            by_okrug[okrug][i] += 1
+            by_cell[(okrug, gender, age)][i] += 1
+            if gender and age:
+                by_demo[(gender, age)][i] += 1
+        elif row["answer"] == "Отказался отвечать":
+            refusers[(okrug, gender, age)] += 1
+    answered_valid = sum(overall[:len(parties)])
+    if not answered_valid:
+        return None
+    prior = [count / sum(overall) for count in overall]
+
+    allocated = [0.0] * size
+    tilt_up = [0.0] * len(parties)
+    tilt_down = [0.0] * len(parties)
+    for (okrug, gender, age), count in refusers.items():
+        by_demographics = _blend(by_demo[(gender, age)], prior, FORECAST_SHRINK_MARGIN) if gender and age else prior
+        by_geography = _blend(by_okrug[okrug], prior, FORECAST_SHRINK_MARGIN)
+        expected = [by_demographics[i] * by_geography[i] / prior[i] if prior[i] else 0.0 for i in range(size)]
+        norm = sum(expected) or 1.0
+        cell = _blend(by_cell[(okrug, gender, age)], [value / norm for value in expected], FORECAST_SHRINK_CELL)
+        for i in range(size):
+            allocated[i] += count * cell[i]
+        for i in range(len(parties)):
+            up = cell[i] * FORECAST_TILT / (cell[i] * FORECAST_TILT + 1 - cell[i])
+            down = cell[i] / FORECAST_TILT / (cell[i] / FORECAST_TILT + 1 - cell[i])
+            tilt_up[i] += count * up
+            tilt_down[i] += count * down
+
+    votes = [overall[i] + allocated[i] for i in range(len(parties))]
+    total = sum(votes)
+    result = []
+    for i, label in enumerate(parties):
+        share = votes[i] * 100 / total
+        answered = overall[i] * 100 / answered_valid
+        tilt = (abs((overall[i] + tilt_up[i]) * 100 / total - share)
+                + abs(share - (overall[i] + tilt_down[i]) * 100 / total)) / 2
+        p = min(max(votes[i] / total, 1 / answered_valid), 1 - 1 / answered_valid)
+        sampling = 1.96 * math.sqrt(FORECAST_DEFF * p * (1 - p) / answered_valid) * 100
+        result.append({"label": label, "votes": round(votes[i]), "answered": round(answered, 1),
+                       "forecast": round(share, 1), "delta": round(share - answered, 1),
+                       "margin": round(math.hypot(sampling, tilt), 1)})
+    result.sort(key=lambda item: -item["forecast"])
+    return {"respondents": answered_valid, "refusers": sum(refusers.values()), "rows": result}
+
+
 def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
                         requested_tik=None, requested_precinct=None, statuses=None):
     """Build a small, privacy-conscious aggregate from rows in Google Sheets."""
@@ -637,6 +716,19 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
                 + [r for r in heat_rows if r["label"] in service_answers],
     }
 
+    age_answers = {age: Counter(row["answer"] for row in filtered if row["age"] == age) for age in AGES}
+    age_rows = []
+    for party_id, label in PARTIES:
+        if party_id != "2":
+            age_rows.append({"label": label, "total": answers[label],
+                             "cells": [{"count": age_answers[age][label]} for age in AGES]})
+    party_age = {
+        "ages": [{"age": age, "total": sum(age_answers[age].values())} for age in AGES],
+        "overall": total,
+        "rows": sorted((r for r in age_rows if r["label"] not in service_answers), key=lambda r: -r["total"])
+                + [r for r in age_rows if r["label"] in service_answers],
+    }
+
     statuses = statuses or {}
     severity_rank = {"high": 0, "medium": 1}
     anomaly_items = []
@@ -684,7 +776,8 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
         "ages": [{"label": label, "count": ages[label],
                   "percent": round(ages[label] * 100 / total, 1) if total else 0} for label in AGES],
         "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
-        "new_people_by_okrug": new_people_by_okrug, "new_people_by_age": new_people_by_age, "party_okrug": party_okrug, "anomalies": anomalies,
+        "new_people_by_okrug": new_people_by_okrug, "new_people_by_age": new_people_by_age, "party_okrug": party_okrug, "party_age": party_age,
+        "forecast": forecast_shares(filtered), "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,
     }

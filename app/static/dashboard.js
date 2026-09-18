@@ -5,6 +5,7 @@ let timer = null;
 let allInterviewers = [];
 let interviewersTotal = 0;
 let anomalyPayload = null;
+let lastAgeHeat = null;
 let showClosedAnomalies = false;
 let anomalyRenderPending = false;
 const interviewerSort = {key:'', dir:'desc'};
@@ -61,6 +62,46 @@ function renderNewPeopleAge(groups) {
     parts.push(`больше всего голосов у ${byVotes.label}: ${number(byVotes.count)}`);
   }
   $('#newpeople-age-insight').textContent = parts.join(' · ');
+}
+function renderForecast(forecast, summary) {
+  const body = $('#forecast-body'), warn = $('#forecast-warn');
+  if (!forecast) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">Недостаточно ответов для прогноза</td></tr>';
+    $('#forecast-summary').textContent = ''; warn.hidden = true;
+    return;
+  }
+  const top = Math.max(1, ...forecast.rows.map(r => r.forecast));
+  body.innerHTML = forecast.rows.map(r => `<tr><td class="territory">${escapeHTML(r.label)}</td><td>${r.answered}%</td><td><div class="share"><i></i><span><strong>${r.forecast}%</strong></span></div></td><td class="${r.delta > 0 ? 'delta-up' : r.delta < 0 ? 'delta-down' : ''}">${r.delta > 0 ? '+' : ''}${r.delta}</td><td>± ${r.margin} п.п.</td></tr>`).join('');
+  body.querySelectorAll('.share i').forEach((el, index) => { el.style.width = (forecast.rows[index].forecast / top * 90) + 'px'; });
+  const refusalPercent = summary.total ? Math.round(forecast.refusers * 1000 / summary.total) / 10 : 0;
+  $('#forecast-summary').textContent = `Ответили: ${number(forecast.respondents)} · отказались: ${number(forecast.refusers)} (${refusalPercent}% анкет) — распределены по партиям`;
+  warn.hidden = forecast.respondents >= 300;
+  if (!warn.hidden) warn.textContent = `Ответивших мало (${number(forecast.respondents)}): при таком объёме прогноз ненадёжен.`;
+}
+function renderAgeHeatmap(heat) {
+  const validOnly = $('#age-heat-valid').checked;
+  const service = label => label === 'Испортил бюллетень' || label === 'Отказался отвечать';
+  const partyRows = heat.rows.filter(row => !service(row.label));
+  const columnTotals = heat.ages.map((age, i) => validOnly ? partyRows.reduce((sum, row) => sum + row.cells[i].count, 0) : age.total);
+  const overall = validOnly ? partyRows.reduce((sum, row) => sum + row.total, 0) : heat.overall;
+  const percent = (count, base) => base ? Math.round(count * 1000 / base) / 10 : 0;
+  $('#ageheat-head').innerHTML = `<tr><th class="sticky-col">Ответ</th>${heat.ages.map((age, i) => `<th>${escapeHTML(age.age)}<small>n = ${number(columnTotals[i])}</small></th>`).join('')}<th>Все<small>n = ${number(overall)}</small></th></tr>`;
+  const body = $('#ageheat-body');
+  const rows = validOnly ? partyRows : heat.rows;
+  body.innerHTML = rows.map(row => {
+    const values = row.cells.map((cell, i) => percent(cell.count, columnTotals[i]));
+    const top = Math.max(0, ...values);
+    return `<tr class="${service(row.label) ? 'service-row' : ''}"><th>${escapeHTML(row.label)}</th>${values.map((value, i) => `<td class="heat" data-level="${top ? value / top : 0}" title="${number(row.cells[i].count)} анкет">${value}%</td>`).join('')}<td>${percent(row.total, overall)}%</td></tr>`;
+  }).join('');
+  body.querySelectorAll('tr').forEach(tr => {
+    const rgb = tr.classList.contains('service-row') ? '217,120,98' : '70,99,77';
+    tr.querySelectorAll('td.heat').forEach(cell => {
+      const level = Number(cell.dataset.level);
+      cell.style.background = level ? `rgba(${rgb}, ${0.08 + 0.72 * level})` : '';
+      cell.classList.toggle('heat-dark', level > 0.6);
+    });
+  });
+  $('#ageheat-note').textContent = validOnly ? 'Доля внутри возрастной группы среди ответивших партии (без отказов и испорченных бюллетеней).' : 'Доля внутри возрастной группы от всех её анкет, включая отказы. Яркость — относительно максимума в строке.';
 }
 function renderSummary(summary) {
   const cards = [
@@ -196,7 +237,7 @@ function renderFilters(data) {
 function render(data) {
   renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties);
   renderColumns('#gender-chart',data.genders,{compact:true}); renderColumns('#age-chart',data.ages,{compact:true}); renderHours(data.hours);
-  renderColumns('#newpeople-chart',data.new_people_by_okrug); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderForecast(data.forecast, data.summary);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;
@@ -238,6 +279,12 @@ $('#f-reset').addEventListener('click', () => {
   document.querySelectorAll('.range-filters input').forEach(input => { input.value = ''; });
   applyInterviewerFilter();
 });
+document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(other => { other.classList.toggle('active', other === tab); other.setAttribute('aria-selected', String(other === tab)); });
+  $('#tab-answers').hidden = tab.dataset.tab !== 'answers';
+  $('#tab-forecast').hidden = tab.dataset.tab !== 'forecast';
+}));
+$('#age-heat-valid').addEventListener('change', () => { if (lastAgeHeat) renderAgeHeatmap(lastAgeHeat); });
 $('#anomaly-show-closed').addEventListener('change', event => { showClosedAnomalies = event.target.checked; renderAnomalies(); });
 $('#anomalies').addEventListener('focusout', () => setTimeout(() => { if (anomalyRenderPending && !anomalyEditing()) renderAnomalies(); }, 0));
 $('#anomalies').addEventListener('click', async event => {

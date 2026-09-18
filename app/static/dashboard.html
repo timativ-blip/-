@@ -53,7 +53,19 @@
       <section id="summary" class="summary" aria-label="Ключевые показатели"></section>
 
       <section class="grid two">
-        <article class="panel party-panel"><header><div><p class="kicker">РЕЗУЛЬТАТЫ</p><h2>Ответы по партиям</h2></div><span class="panel-note">доля от всех анкет</span></header><div id="party-chart"></div></article>
+        <article class="panel party-panel"><header><div><p class="kicker">РЕЗУЛЬТАТЫ</p><h2>Ответы по партиям</h2></div><div class="tabs" role="tablist" aria-label="Режим"><button class="tab active" type="button" role="tab" aria-selected="true" data-tab="answers">Ответы</button><button class="tab" type="button" role="tab" aria-selected="false" data-tab="forecast">Прогноз</button></div></header>
+          <div id="tab-answers"><p class="panel-note tab-note">доля от всех анкет</p><div id="party-chart"></div></div>
+          <div id="tab-forecast" hidden>
+            <p id="forecast-summary" class="insight"></p>
+            <div id="forecast-warn" class="alert" hidden></div>
+            <div class="table-scroll"><table class="forecast"><thead><tr><th>Партия</th><th>Ответили, %</th><th>Прогноз, %</th><th>Изменение, п.п.</th><th>Коридор</th></tr></thead><tbody id="forecast-body"></tbody></table></div>
+            <details class="method"><summary>Как считается прогноз</summary>
+              <p>Отказавшиеся распределяются по партиям так же, как ответившие в той же группе «округ × пол × возраст» (пол и возраст при отказе мы собираем). Малочисленные группы сглаживаются: их оценка подтягивается к тому, что по отдельности говорят округ и возрастная группа, и к общему распределению. Доли считаются от действительных бюллетеней, испорченные не входят.</p>
+              <p>Коридор объединяет статистическую погрешность (95%, с поправкой ×2 на кластерность выборки по участкам) и чувствительность к тому, что отказавшиеся голосуют иначе: шансы за партию выше или ниже в 1,25 раза. Значит, «доли не сильно отличаются» заложено как базовое допущение, а коридор показывает цену ошибки в нём.</p>
+              <p>Ограничение: опрос охватывает только голосующих на участках. Электронное голосование (ДЭГ) не охвачено: по данным РИА на 18:00 18.09 в Московской области оно составляло около 40% явки (480 тыс. из 1,21 млн), общая явка 19,67%. Прогноз описывает голосующих на участках, а не итог по области целиком, и предпочтения ДЭГ-избирателей в него не заложены.</p>
+            </details>
+          </div>
+        </article>
         <article class="panel"><header><div><p class="kicker">ПОРТРЕТ</p><h2>Пол и возраст</h2></div></header><h3>Пол</h3><div id="gender-chart"></div><h3>Возраст</h3><div id="age-chart"></div></article>
       </section>
 
@@ -62,6 +74,8 @@
       <section class="panel"><header><div><p class="kicker">НОВЫЕ ЛЮДИ</p><h2>Голоса по возрасту</h2><p id="newpeople-age-insight" class="insight"></p></div><span class="panel-note">число голосов и доля внутри возрастной группы</span></header><div id="newpeople-age-chart"></div></section>
 
       <section class="panel table-panel"><header><div><p class="kicker">ТЕПЛОВАЯ КАРТА</p><h2>Партия × округ</h2></div><span class="panel-note">доля от анкет округа · яркость — относительно максимума в строке</span></header><div class="table-scroll"><table class="heatmap"><thead id="heatmap-head"></thead><tbody id="heatmap-body"></tbody></table></div></section>
+
+      <section class="panel table-panel"><header><div><p class="kicker">ТЕПЛОВАЯ КАРТА</p><h2>Партия × возраст</h2></div><label class="switch"><input id="age-heat-valid" type="checkbox"><span class="switch-track"></span><span>Только ответившие</span></label></header><div class="table-scroll"><table class="heatmap"><thead id="ageheat-head"></thead><tbody id="ageheat-body"></tbody></table></div><p class="panel-note table-note" id="ageheat-note"></p></section>
 
       <section class="panel timeline-panel"><header><div><p class="kicker">ДИНАМИКА</p><h2>Анкеты по времени</h2></div><span class="panel-note">по времени заполнения</span></header><div id="hours-chart" class="hour-chart"></div></section>
 
