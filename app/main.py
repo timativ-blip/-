@@ -11,6 +11,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import zlib
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -484,10 +485,17 @@ def write_anomaly_status(settings, record, session=None):
     _google_call(session, run)
 
 
+FORECAST_PARTIES = [label for pid, label in PARTIES if pid not in ("2", "spoiled", "refused")]
+FORECAST_CATEGORIES = FORECAST_PARTIES + ["Испортил бюллетень"]
 FORECAST_DEFF = 2.0
 FORECAST_TILT = 1.25
-FORECAST_SHRINK_MARGIN = 30
-FORECAST_SHRINK_CELL = 15
+SHRINK_MARGIN, SHRINK_CELL, SHRINK_OKRUG, SHRINK_TIK = 30, 15, 50, 50
+JACKKNIFE_GROUPS = 10
+HISTORY_FRACTIONS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+YOUNG_AGES, OLDER_AGES = ("18–24", "25–34", "35–44"), ("45–60", "61+")
+# Context from the news report used for the remote-voting (DEG) scenarios. It is a dated snapshot, not live data.
+DEG_CONTEXT = {"source": "РИА Новости", "as_of": "18:00 МСК 18.09.2026", "share": 0.397, "turnout": 19.67}
+_FORECAST_CACHE = {}
 
 
 def _blend(counts, prior, strength):
@@ -495,72 +503,217 @@ def _blend(counts, prior, strength):
     return [(counts[i] + strength * prior[i]) / (total + strength) for i in range(len(prior))]
 
 
-def forecast_shares(rows):
-    """Spread "refused" surveys over the parties.
+def _prepare_forecast_rows(rows):
+    position = {label: i for i, label in enumerate(FORECAST_CATEGORIES)}
+    prepared = []
+    for row in rows:
+        if row["answer"] in position:
+            kind = position[row["answer"]]
+        elif row["answer"] == "Отказался отвечать":
+            kind = -1
+        else:
+            continue
+        tik = row["tik"]
+        prepared.append((tik, TIK_TO_OKRUG.get(tik, ""), row["gender"], row["age"], kind,
+                         row["precinct_id"], parse_moment(row["created_at"])))
+    return prepared
 
-    A refuser is assumed to vote like respondents in the same okrug x gender x age cell. Sparse cells
-    are pulled toward what the okrug and the demographic group say separately, then toward the overall
-    split. The band combines sampling error (with a cluster design effect) and sensitivity to refusers
-    having FORECAST_TILT times higher or lower odds for a party than their cell suggests.
-    """
-    parties = [label for pid, label in PARTIES if pid not in ("2", "spoiled", "refused")]
-    categories = parties + ["Испортил бюллетень"]
-    position = {label: i for i, label in enumerate(categories)}
-    size = len(categories)
 
+def _forecast_core(prepared, uik_counts, detail=False):
+    """One pass of the estimate. Returns vectors over FORECAST_PARTIES (fractions) or None without data."""
+    size, count_parties = len(FORECAST_CATEGORIES), len(FORECAST_PARTIES)
     overall = [0] * size
     by_demo = defaultdict(lambda: [0] * size)
     by_okrug = defaultdict(lambda: [0] * size)
     by_cell = defaultdict(lambda: [0] * size)
+    by_tik = defaultdict(lambda: [0] * size)
+    by_age = defaultdict(lambda: [0.0] * size)
     refusers = Counter()
-    for row in rows:
-        okrug, gender, age = TIK_TO_OKRUG.get(row["tik"], ""), row["gender"], row["age"]
-        if row["answer"] in position:
-            i = position[row["answer"]]
-            overall[i] += 1
-            by_okrug[okrug][i] += 1
-            by_cell[(okrug, gender, age)][i] += 1
+    for tik, okrug, gender, age, kind, _precinct, _moment in prepared:
+        if kind >= 0:
+            overall[kind] += 1
+            by_okrug[okrug][kind] += 1
+            by_cell[(okrug, gender, age)][kind] += 1
+            by_tik[tik][kind] += 1
             if gender and age:
-                by_demo[(gender, age)][i] += 1
-        elif row["answer"] == "Отказался отвечать":
-            refusers[(okrug, gender, age)] += 1
-    answered_valid = sum(overall[:len(parties)])
-    if not answered_valid:
+                by_demo[(gender, age)][kind] += 1
+            if detail:
+                by_age[age][kind] += 1
+        else:
+            refusers[(tik, okrug, gender, age)] += 1
+    valid = sum(overall[:count_parties])
+    if not valid:
         return None
     prior = [count / sum(overall) for count in overall]
 
-    allocated = [0.0] * size
-    tilt_up = [0.0] * len(parties)
-    tilt_down = [0.0] * len(parties)
-    for (okrug, gender, age), count in refusers.items():
-        by_demographics = _blend(by_demo[(gender, age)], prior, FORECAST_SHRINK_MARGIN) if gender and age else prior
-        by_geography = _blend(by_okrug[okrug], prior, FORECAST_SHRINK_MARGIN)
-        expected = [by_demographics[i] * by_geography[i] / prior[i] if prior[i] else 0.0 for i in range(size)]
-        norm = sum(expected) or 1.0
-        cell = _blend(by_cell[(okrug, gender, age)], [value / norm for value in expected], FORECAST_SHRINK_CELL)
+    pooled = [0.0] * size
+    alloc_tik = defaultdict(lambda: [0.0] * size)
+    tilt_up, tilt_down = [0.0] * count_parties, [0.0] * count_parties
+    cells = {}
+    for (tik, okrug, gender, age), count in refusers.items():
+        key = (okrug, gender, age)
+        if key not in cells:
+            by_demographics = _blend(by_demo[(gender, age)], prior, SHRINK_MARGIN) if gender and age else prior
+            by_geography = _blend(by_okrug[okrug], prior, SHRINK_MARGIN)
+            expected = [by_demographics[i] * by_geography[i] / prior[i] if prior[i] else 0.0 for i in range(size)]
+            norm = sum(expected) or 1.0
+            cell = _blend(by_cell[key], [value / norm for value in expected], SHRINK_CELL)
+            up = [cell[i] * FORECAST_TILT / (cell[i] * FORECAST_TILT + 1 - cell[i]) for i in range(count_parties)]
+            down = [cell[i] / FORECAST_TILT / (cell[i] / FORECAST_TILT + 1 - cell[i]) for i in range(count_parties)]
+            cells[key] = (cell, up, down)
+        cell, up, down = cells[key]
         for i in range(size):
-            allocated[i] += count * cell[i]
-        for i in range(len(parties)):
-            up = cell[i] * FORECAST_TILT / (cell[i] * FORECAST_TILT + 1 - cell[i])
-            down = cell[i] / FORECAST_TILT / (cell[i] / FORECAST_TILT + 1 - cell[i])
-            tilt_up[i] += count * up
-            tilt_down[i] += count * down
+            pooled[i] += count * cell[i]
+            alloc_tik[tik][i] += count * cell[i]
+            if detail:
+                by_age[age][i] += count * cell[i]
+        for i in range(count_parties):
+            tilt_up[i] += count * up[i]
+            tilt_down[i] += count * down[i]
 
-    votes = [overall[i] + allocated[i] for i in range(len(parties))]
-    total = sum(votes)
-    result = []
-    for i, label in enumerate(parties):
-        share = votes[i] * 100 / total
-        answered = overall[i] * 100 / answered_valid
-        tilt = (abs((overall[i] + tilt_up[i]) * 100 / total - share)
-                + abs(share - (overall[i] + tilt_down[i]) * 100 / total)) / 2
-        p = min(max(votes[i] / total, 1 / answered_valid), 1 - 1 / answered_valid)
-        sampling = 1.96 * math.sqrt(FORECAST_DEFF * p * (1 - p) / answered_valid) * 100
-        result.append({"label": label, "votes": round(votes[i]), "answered": round(answered, 1),
-                       "forecast": round(share, 1), "delta": round(share - answered, 1),
-                       "margin": round(math.hypot(sampling, tilt), 1)})
-    result.sort(key=lambda item: -item["forecast"])
-    return {"respondents": answered_valid, "refusers": sum(refusers.values()), "rows": result}
+    adjusted = [overall[i] + pooled[i] for i in range(count_parties)]
+    adjusted_total = sum(adjusted)
+    with_refusals = [value / adjusted_total for value in adjusted]
+    raw = [overall[i] / valid for i in range(count_parties)]
+    tilt = [(abs((overall[i] + tilt_up[i]) / adjusted_total - with_refusals[i])
+             + abs(with_refusals[i] - (overall[i] + tilt_down[i]) / adjusted_total)) / 2
+            for i in range(count_parties)]
+
+    final, covered, tiks_with_data = with_refusals, 0.0, 0
+    if uik_counts:
+        vectors = {tik: [by_tik[tik][i] + alloc_tik[tik][i] for i in range(count_parties)]
+                   for tik in set(by_tik) | set(alloc_tik)}
+        okrug_totals = defaultdict(lambda: [0.0] * count_parties)
+        for tik, vector in vectors.items():
+            if tik in TIK_TO_OKRUG:
+                for i in range(count_parties):
+                    okrug_totals[TIK_TO_OKRUG[tik]][i] += vector[i]
+        okrug_share = {okrug: _blend(vector, with_refusals, SHRINK_OKRUG) for okrug, vector in okrug_totals.items()}
+        weight_total = sum(uik_counts.values())
+        accumulated = [0.0] * count_parties
+        for tik, weight in uik_counts.items():
+            vector = vectors.get(tik)
+            parent = okrug_share.get(TIK_TO_OKRUG.get(tik, ""), with_refusals)
+            if vector and sum(vector):
+                share = _blend(vector, parent, SHRINK_TIK)
+                covered += weight
+                tiks_with_data += 1
+            else:
+                share = parent
+            for i in range(count_parties):
+                accumulated[i] += weight * share[i]
+        final = [value / weight_total for value in accumulated]
+        covered /= weight_total
+
+    result = {"raw": raw, "with_refusals": with_refusals, "final": final, "tilt": tilt, "valid": valid,
+              "refusers": sum(refusers.values()), "covered": covered, "tiks_with_data": tiks_with_data}
+    if detail:
+        result["by_age"] = {age: vector[:count_parties] for age, vector in by_age.items()}
+    return result
+
+
+def forecast_shares(rows, uik_counts=None):
+    """Forecast of the final split among valid ballots, from all survey rows (independent of dashboard filters).
+
+    Steps: respondents -> refusers spread over okrug x gender x age cells -> territories weighted by their
+    number of UIKs (TIKs without data borrow their okrug's estimate) -> flow diagnostics (how the estimate
+    moved as data arrived) -> uncertainty from a delete-a-group jackknife over UIKs (cluster design) combined
+    with sensitivity to refusers voting differently.
+    """
+    prepared = _prepare_forecast_rows(rows)
+    fingerprint = (hash(tuple((t[0], t[2], t[3], t[4], t[5], t[6]) for t in prepared)),
+                   hash(tuple(sorted((uik_counts or {}).items()))))
+    if fingerprint in _FORECAST_CACHE:
+        return _FORECAST_CACHE[fingerprint]
+    full = _forecast_core(prepared, uik_counts, detail=True)
+    if full is None:
+        return None
+    parties, count_parties = FORECAST_PARTIES, len(FORECAST_PARTIES)
+
+    groups = {}
+    for item in prepared:
+        groups.setdefault(item[5], zlib.crc32(item[5].encode()) % JACKKNIFE_GROUPS)
+    replicates = []
+    for group in sorted(set(groups.values())):
+        part = _forecast_core([item for item in prepared if groups[item[5]] != group], uik_counts)
+        if part:
+            replicates.append(part["final"])
+    # Never below plain sampling error (which is also the fallback when there are too few UIK groups).
+    floor = [math.sqrt(max(p, 1 / full["valid"]) * (1 - max(p, 1 / full["valid"])) / full["valid"]) for p in full["final"]]
+    standard_error = list(floor)
+    if len(replicates) >= 5:
+        count = len(replicates)
+        for i in range(count_parties):
+            mean = sum(rep[i] for rep in replicates) / count
+            jackknife = math.sqrt((count - 1) / count * sum((rep[i] - mean) ** 2 for rep in replicates))
+            standard_error[i] = max(jackknife, floor[i])
+    else:
+        standard_error = [error * math.sqrt(FORECAST_DEFF) for error in floor]
+
+    ordered = sorted(prepared, key=lambda item: item[6] or datetime.min.replace(tzinfo=timezone.utc))
+    history = []
+    for fraction in HISTORY_FRACTIONS:
+        size = max(1, math.ceil(len(ordered) * fraction))
+        part = full if fraction == 1.0 else _forecast_core(ordered[:size], uik_counts)
+        if part:
+            moment = ordered[size - 1][6]
+            history.append({"fraction": fraction, "n": size, "at": moment.isoformat() if moment else "",
+                            "final": [round(value * 100, 1) for value in part["final"]]})
+
+    order = sorted(range(count_parties), key=lambda i: -full["final"][i])
+    trend_point = next((point for point in history if point["fraction"] == 0.7), None)
+    rows_out = []
+    for i in order:
+        forecast = full["final"][i] * 100
+        margin = math.hypot(1.96 * standard_error[i] * 100, full["tilt"][i] * 100)
+        rows_out.append({
+            "label": parties[i], "answered": round(full["raw"][i] * 100, 1),
+            "with_refusals": round(full["with_refusals"][i] * 100, 1), "forecast": round(forecast, 1),
+            "delta": round(forecast - full["raw"][i] * 100, 1), "margin": round(margin, 1),
+            "trend": round(forecast - trend_point["final"][i], 1) if trend_point else None})
+
+    def group_share(ages):
+        vector = [sum(full["by_age"].get(age, [0.0] * count_parties)[i] for age in ages) for i in range(count_parties)]
+        total = sum(vector)
+        return [value / total for value in vector] if total else None
+
+    scenarios = []
+    for key, title, ages in (("young", "ДЭГ как избиратели 18–44 лет", YOUNG_AGES), ("older", "ДЭГ как избиратели 45+", OLDER_AGES)):
+        share = group_share(ages)
+        if share:
+            mixed = [(1 - DEG_CONTEXT["share"]) * full["final"][i] + DEG_CONTEXT["share"] * share[i]
+                     for i in range(count_parties)]
+            scenarios.append({"key": key, "title": title, "values": {parties[i]: round(mixed[i] * 100, 1) for i in order}})
+
+    age_totals = Counter(item[3] for item in prepared if item[3])
+    refusal_by_age = Counter(item[3] for item in prepared if item[3] and item[4] == -1)
+    sample_with_age = sum(age_totals.values())
+    ages = []
+    for age in AGES:
+        share = group_share((age,))
+        if age_totals[age] and share:
+            best = max(range(count_parties), key=lambda i: share[i])
+            ages.append({"age": age, "sample_share": round(age_totals[age] * 100 / sample_with_age, 1),
+                         "refusal_rate": round(refusal_by_age[age] * 100 / age_totals[age], 1),
+                         "leader": parties[best], "leader_share": round(share[best] * 100, 1)})
+
+    moments = [item[6] for item in prepared if item[6]]
+    result = {
+        "rows": rows_out,
+        "scope": {"anket": len(prepared), "respondents": full["valid"], "refusers": full["refusers"],
+                  "tiks_with_data": full["tiks_with_data"], "tiks_total": len(uik_counts or {}),
+                  "covered_share": round(full["covered"] * 100), "days": sorted({r["day"] for r in rows if r["day"]}),
+                  "last_at": max(moments).isoformat() if moments else ""},
+        "history": {"points": [{k: v for k, v in point.items() if k != "final"} for point in history],
+                    "series": [{"label": parties[i], "values": [point["final"][i] for point in history]}
+                               for i in order[:4]]},
+        "ages": ages,
+        "deg": {**DEG_CONTEXT, "scenarios": scenarios},
+    }
+    if len(_FORECAST_CACHE) >= 4:
+        _FORECAST_CACHE.clear()
+    _FORECAST_CACHE[fingerprint] = result
+    return result
 
 
 def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
@@ -777,7 +930,8 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
                   "percent": round(ages[label] * 100 / total, 1) if total else 0} for label in AGES],
         "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
         "new_people_by_okrug": new_people_by_okrug, "new_people_by_age": new_people_by_age, "party_okrug": party_okrug, "party_age": party_age,
-        "forecast": forecast_shares(filtered), "anomalies": anomalies,
+        "forecast": forecast_shares(rows, Counter(p["tik"] for p in settings.precincts if p.get("tik"))),
+        "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,
     }

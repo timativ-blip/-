@@ -63,20 +63,66 @@ function renderNewPeopleAge(groups) {
   }
   $('#newpeople-age-insight').textContent = parts.join(' · ');
 }
+const SERIES_COLORS = ['#46634d', '#d97862', '#5f86a3', '#c9a227'];
+function fmtSigned(value) { return (value > 0 ? '+' : '') + (Math.round(value * 10) / 10); }
+function forecastMoment(iso) {
+  return iso ? new Date(iso).toLocaleString('ru-RU', {day:'numeric', month:'long', hour:'2-digit', minute:'2-digit'}) : '—';
+}
+function renderForecastHistory(history) {
+  const box = $('#forecast-history');
+  if (history.points.length < 2) { box.innerHTML = '<p class="empty">Пока мало данных для динамики</p>'; return; }
+  const width = 620, height = 220, left = 42, right = 12, top = 14, bottom = 30;
+  const all = history.series.flatMap(s => s.values);
+  const low = Math.max(0, Math.floor(Math.min(...all) - 1));
+  const tickStep = Math.max(1, Math.ceil((Math.ceil(Math.max(...all) + 1) - low) / 3));
+  const high = low + tickStep * 3;
+  const x = i => left + (width - left - right) * i / (history.points.length - 1);
+  const y = v => top + (height - top - bottom) * (1 - (v - low) / ((high - low) || 1));
+  const grid = [0, 1, 2, 3].map(step => { const v = low + (high - low) * step / 3; return `<line x1="${left}" x2="${width - right}" y1="${y(v)}" y2="${y(v)}" stroke="#dfe7dc"/><text class="axis-label" x="${left - 6}" y="${y(v) + 3}" text-anchor="end">${Math.round(v * 10) / 10}%</text>`; }).join('');
+  const ticks = history.points.map((point, i) => `<text class="axis-label" x="${x(i)}" y="${height - 10}" text-anchor="middle">${Math.round(point.fraction * 100)}%</text>`).join('');
+  const lines = history.series.map((serie, k) => {
+    const path = serie.values.map((v, i) => `${i ? 'L' : 'M'}${x(i)},${y(v)}`).join(' ');
+    const dots = serie.values.map((v, i) => `<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="${SERIES_COLORS[k]}"><title>${escapeHTML(serie.label)}: ${v}% · ${number(history.points[i].n)} анкет</title></circle>`).join('');
+    return `<path d="${path}" fill="none" stroke="${SERIES_COLORS[k]}" stroke-width="2"/>${dots}`;
+  }).join('');
+  const legend = history.series.map((serie, k) => `<span class="legend-item"><svg width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" fill="${SERIES_COLORS[k]}"/></svg>${escapeHTML(serie.label)}</span>`).join('');
+  box.innerHTML = `<svg class="history-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Динамика прогноза">${grid}${ticks}${lines}</svg><div class="legend">${legend}</div><p class="panel-note">Ось X — доля поступивших данных по времени заполнения анкет; на каждой точке прогноз пересчитан по всем анкетам до неё.</p>`;
+}
 function renderForecast(forecast, summary) {
   const body = $('#forecast-body'), warn = $('#forecast-warn');
   if (!forecast) {
-    body.innerHTML = '<tr><td colspan="5" class="empty">Недостаточно ответов для прогноза</td></tr>';
-    $('#forecast-summary').textContent = ''; warn.hidden = true;
+    body.innerHTML = '<tr><td colspan="6" class="empty">Недостаточно ответов для прогноза</td></tr>';
+    for (const id of ['forecast-summary', 'forecast-steps', 'forecast-history', 'forecast-ages', 'deg-head', 'deg-body', 'forecast-deg']) $('#' + id).innerHTML = '';
+    warn.hidden = true;
     return;
   }
-  const top = Math.max(1, ...forecast.rows.map(r => r.forecast));
-  body.innerHTML = forecast.rows.map(r => `<tr><td class="territory">${escapeHTML(r.label)}</td><td>${r.answered}%</td><td><div class="share"><i></i><span><strong>${r.forecast}%</strong></span></div></td><td class="${r.delta > 0 ? 'delta-up' : r.delta < 0 ? 'delta-down' : ''}">${r.delta > 0 ? '+' : ''}${r.delta}</td><td>± ${r.margin} п.п.</td></tr>`).join('');
-  body.querySelectorAll('.share i').forEach((el, index) => { el.style.width = (forecast.rows[index].forecast / top * 90) + 'px'; });
-  const refusalPercent = summary.total ? Math.round(forecast.refusers * 1000 / summary.total) / 10 : 0;
-  $('#forecast-summary').textContent = `Ответили: ${number(forecast.respondents)} · отказались: ${number(forecast.refusers)} (${refusalPercent}% анкет) — распределены по партиям`;
-  warn.hidden = forecast.respondents >= 300;
-  if (!warn.hidden) warn.textContent = `Ответивших мало (${number(forecast.respondents)}): при таком объёме прогноз ненадёжен.`;
+  const {scope, rows} = forecast;
+  const top = Math.max(1, ...rows.map(r => r.forecast));
+  body.innerHTML = rows.map(r => `<tr><td class="territory">${escapeHTML(r.label)}</td><td>${r.answered}%</td><td><div class="share"><i></i><span><strong>${r.forecast}%</strong></span></div></td><td class="${r.delta > 0 ? 'delta-up' : r.delta < 0 ? 'delta-down' : ''}">${fmtSigned(r.delta)}</td><td>± ${r.margin} п.п.</td><td class="${r.trend > 0 ? 'delta-up' : r.trend < 0 ? 'delta-down' : ''}">${r.trend === null ? '—' : fmtSigned(r.trend)}</td></tr>`).join('');
+  body.querySelectorAll('.share i').forEach((el, index) => { el.style.width = (rows[index].forecast / top * 90) + 'px'; });
+  const refusalPercent = scope.anket ? Math.round(scope.refusers * 1000 / scope.anket) / 10 : 0;
+  $('#forecast-summary').textContent = `Данные: ${number(scope.anket)} анкет · ответили ${number(scope.respondents)} · отказались ${number(scope.refusers)} (${refusalPercent}%) · ТИК с данными ${scope.tiks_with_data} из ${scope.tiks_total}`;
+  warn.hidden = scope.respondents >= 300;
+  if (!warn.hidden) warn.textContent = `Ответивших мало (${number(scope.respondents)}): при таком объёме прогноз ненадёжен.`;
+
+  const lead = rows.slice(0, 3);
+  const effect = (from, to) => lead.map(r => `${r.label} ${fmtSigned(r[to] - r[from])}`).join(', ');
+  const drift = Math.max(...lead.map(r => Math.abs(r.trend ?? 0)));
+  const stable = lead.every(r => r.trend !== null) ? (drift <= 1 ? `оценка стабильна: у лидеров сдвиг не больше ${Math.round(drift * 10) / 10} п.п.` : `оценка ещё дрейфует (до ${Math.round(drift * 10) / 10} п.п.): данных пока недостаточно для устойчивого прогноза`) : 'для тренда пока мало данных';
+  const steps = [
+    `<strong>Ответившие.</strong> ${number(scope.respondents)} человек назвали партию: ${lead.map(r => `${escapeHTML(r.label)} ${r.answered}%`).join(', ')}.`,
+    `<strong>Отказавшиеся.</strong> ${number(scope.refusers)} человек не назвали партию. Мы знаем их округ, пол и возраст, поэтому распределили их по партиям так же, как ответивших в той же группе; малочисленные группы сглажены. Эффект шага, п.п.: ${effect('answered', 'with_refusals')}. Эффект мал, когда отказавшиеся по составу похожи на ответивших.`,
+    `<strong>Территории.</strong> Данные есть по ${scope.tiks_with_data} из ${scope.tiks_total} ТИК (${scope.covered_share}% участков области). Вес территории — число её УИК; ТИК без данных берут оценку своего округа. Эффект шага, п.п.: ${effect('with_refusals', 'forecast')}.`,
+    `<strong>Поток.</strong> Оценка пересчитывалась по мере поступления анкет (график ниже): ${stable}.`,
+    `<strong>Что не учтено.</strong> Пока есть данные за ${scope.days.length} дн. (${escapeHTML(scope.days.join(', '))}), последняя анкета: ${forecastMoment(scope.last_at)}. Оставшееся время и дни предполагаются такими же по структуре голосующих; когда придут новые анкеты, прогноз пересчитается сам. Электронное голосование опросом не охвачено (сценарии ниже).`,
+  ];
+  $('#forecast-steps').innerHTML = steps.map(item => `<li>${item}</li>`).join('');
+  renderForecastHistory(forecast.history);
+  $('#forecast-ages').innerHTML = forecast.ages.map(a => `<tr><td class="territory">${escapeHTML(a.age)}</td><td>${a.sample_share}%</td><td>${a.refusal_rate}%</td><td>${escapeHTML(a.leader)}</td><td>${a.leader_share}%</td></tr>`).join('');
+  const deg = forecast.deg;
+  $('#forecast-deg').textContent = `По данным ${deg.source} на ${deg.as_of}, явка в области ${deg.turnout}%, из них около ${Math.round(deg.share * 1000) / 10}% проголосовали дистанционно (ДЭГ). Наш опрос идёт только на участках, поэтому итог по области зависит от того, как голосуют ДЭГ-избиратели. Это допущения, а не прогноз: ДЭГ-долю голосов мы берём как у респондентов соответствующего возраста.`;
+  $('#deg-head').innerHTML = `<tr><th>Партия</th><th>Участки (прогноз)</th>${deg.scenarios.map(sc => `<th>${escapeHTML(sc.title)}</th>`).join('')}</tr>`;
+  $('#deg-body').innerHTML = rows.slice(0, 6).map(r => `<tr><td class="territory">${escapeHTML(r.label)}</td><td>${r.forecast}%</td>${deg.scenarios.map(sc => `<td>${sc.values[r.label]}%</td>`).join('')}</tr>`).join('');
 }
 function renderAgeHeatmap(heat) {
   const validOnly = $('#age-heat-valid').checked;

@@ -627,12 +627,15 @@ def survey_rows(settings, spec):
     return rows
 
 
+def forecast_of(settings, spec, uik_counts=None):
+    return forecast_shares(parse_sheet_rows(survey_rows(settings, spec)), uik_counts)
+
+
 def test_forecast_is_neutral_when_refusers_look_like_respondents(settings):
-    spec = [(300, "Единая Россия", "Мужской", "25–34"), (100, "КПРФ", "Мужской", "25–34"),
-            (150, "Отказался отвечать", "Мужской", "25–34")]
-    forecast = forecast_shares(parse_sheet_rows(survey_rows(settings, spec)))
+    forecast = forecast_of(settings, [(300, "Единая Россия", "Мужской", "25–34"), (100, "КПРФ", "Мужской", "25–34"),
+                                      (150, "Отказался отвечать", "Мужской", "25–34")])
     shares = {r["label"]: r for r in forecast["rows"]}
-    assert forecast["respondents"] == 400 and forecast["refusers"] == 150
+    assert forecast["scope"]["respondents"] == 400 and forecast["scope"]["refusers"] == 150
     assert shares["Единая Россия"]["answered"] == 75.0
     assert abs(shares["Единая Россия"]["forecast"] - 75.0) < 0.6
     assert abs(sum(r["forecast"] for r in forecast["rows"]) - 100) < 0.3
@@ -640,17 +643,44 @@ def test_forecast_is_neutral_when_refusers_look_like_respondents(settings):
 
 
 def test_forecast_reweights_by_who_refuses(settings):
-    spec = [(300, "Единая Россия", "Мужской", "61+"), (300, "КПРФ", "Мужской", "18–24"),
-            (300, "Отказался отвечать", "Мужской", "61+")]
-    rows = {r["label"]: r for r in forecast_shares(parse_sheet_rows(survey_rows(settings, spec)))["rows"]}
+    rows = {r["label"]: r for r in forecast_of(settings, [
+        (300, "Единая Россия", "Мужской", "61+"), (300, "КПРФ", "Мужской", "18–24"),
+        (300, "Отказался отвечать", "Мужской", "61+")])["rows"]}
     assert rows["Единая Россия"]["answered"] == 50.0
-    assert rows["Единая Россия"]["forecast"] > 60
-    assert rows["Единая Россия"]["delta"] > 10
-    assert rows["Единая Россия"]["forecast"] == max(r["forecast"] for r in rows.values())
+    assert rows["Единая Россия"]["with_refusals"] > 60 and rows["Единая Россия"]["delta"] > 10
+
+
+def test_forecast_weights_territories_by_uik_count(settings):
+    balashikha = next(p for p in settings.precincts if p["tik"] == "ТИК города Балашиха")
+    dmitrov = next(p for p in settings.precincts if p["tik"] == "ТИК города Дмитров")
+
+    def rows(precinct, answer, prefix):
+        return [[f"{prefix}{i}", "2026-09-16T08:00:00+00:00", "2026-09-16", "А", "Б", precinct["id"], precinct["label"],
+                 answer, "Мужской", "25–34", prefix, "", precinct["tik"]] for i in range(300)]
+    data = parse_sheet_rows(rows(balashikha, "Единая Россия", "a") + rows(dmitrov, "КПРФ", "b"))
+    even = {r["label"]: r for r in forecast_shares(data)["rows"]}
+    weighted = {r["label"]: r for r in forecast_shares(data, {"ТИК города Балашиха": 3, "ТИК города Дмитров": 1})["rows"]}
+    assert even["Единая Россия"]["forecast"] == 50.0
+    assert weighted["Единая Россия"]["answered"] == 50.0 and weighted["Единая Россия"]["forecast"] > 65
+    assert weighted["Единая Россия"]["forecast"] + weighted["КПРФ"]["forecast"] > 98
+
+
+def test_forecast_history_ages_and_deg_scenarios(settings):
+    spec = [(200, "Единая Россия", "Мужской", "61+"), (200, "КПРФ", "Мужской", "18–24"),
+            (100, "Отказался отвечать", "Мужской", "61+")]
+    forecast = forecast_of(settings, spec)
+    points = forecast["history"]["points"]
+    assert points[-1]["fraction"] == 1.0 and points[0]["n"] < points[-1]["n"]
+    assert forecast["history"]["series"][0]["values"][-1] == forecast["rows"][0]["forecast"]
+    old = next(a for a in forecast["ages"] if a["age"] == "61+")
+    assert old["leader"] == "Единая Россия" and old["refusal_rate"] == 33.3
+    scenarios = {s["key"]: s["values"] for s in forecast["deg"]["scenarios"]}
+    assert scenarios["young"]["КПРФ"] > scenarios["older"]["КПРФ"]
+    assert abs(sum(scenarios["young"].values()) - 100) < 0.5
 
 
 def test_forecast_without_valid_answers_is_none(settings):
-    assert forecast_shares(parse_sheet_rows(survey_rows(settings, [(5, "Отказался отвечать", "Мужской", "61+")]))) is None
+    assert forecast_of(settings, [(5, "Отказался отвечать", "Мужской", "61+")]) is None
     assert forecast_shares([]) is None
 
 
@@ -664,4 +694,5 @@ def test_snapshot_has_forecast_and_age_heatmap(settings):
     assert heat["overall"] == 50 and next(a for a in heat["ages"] if a["age"] == "61+")["total"] == 40
     assert heat["rows"][0]["label"] == "Единая Россия" and heat["rows"][0]["cells"][4] == {"count": 30}
     assert [r["label"] for r in heat["rows"][-2:]] == ["Испортил бюллетень", "Отказался отвечать"]
-    assert dashboard_snapshot(survey_rows(settings, spec), settings, requested_day="2026-09-15")["forecast"] is None
+    other_day = dashboard_snapshot(survey_rows(settings, spec), settings, requested_day="2026-09-15")
+    assert other_day["forecast"]["rows"] == snap["forecast"]["rows"]
