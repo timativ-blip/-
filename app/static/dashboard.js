@@ -3,6 +3,7 @@ const $ = selector => document.querySelector(selector);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let timer = null;
 let allInterviewers = [];
+let interviewersTotal = 0;
 const filters = {day:'', okrug:'', tik:'', precinct:''};
 
 async function request(url, options = {}) {
@@ -84,10 +85,16 @@ function applyInterviewerFilter() {
   const query = ($('#interviewer-search')?.value || '').trim().toLowerCase();
   const items = query ? allInterviewers.filter(item => item.name.toLowerCase().includes(query)) : allInterviewers;
   const empty = allInterviewers.length ? 'Совпадений не найдено' : 'Нет данных об интервьюерах';
-  $('#interviewers').innerHTML = items.length ? items.map(item => `<tr><td class="territory">${escapeHTML(item.name)}</td><td title="${escapeHTML(item.tik)}">${escapeHTML(item.precinct)}</td><td>${number(item.total)}</td><td>${number(item.refusals)}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">${empty}</td></tr>`;
+  $('#interviewers').innerHTML = items.length ? items.map(item => {
+    const success = item.total - item.refusals;
+    const refusalPercent = item.total ? Math.round(item.refusals * 1000 / item.total) / 10 : 0;
+    const sharePercent = interviewersTotal ? Math.round(item.total * 1000 / interviewersTotal) / 10 : 0;
+    return `<tr><td class="territory">${escapeHTML(item.name)}</td><td title="${escapeHTML(item.tik)}">${escapeHTML(item.precinct)}</td><td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(success)}</td><td>${refusalPercent}%</td><td>${sharePercent}%</td></tr>`;
+  }).join('') : `<tr><td colspan="7" class="empty">${empty}</td></tr>`;
 }
-function renderInterviewers(items) {
+function renderInterviewers(items, total) {
   allInterviewers = items;
+  interviewersTotal = total;
   applyInterviewerFilter();
 }
 function renderRecent(items) {
@@ -111,7 +118,7 @@ function render(data) {
   renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties);
   renderColumns('#gender-chart',data.genders,{compact:true}); renderColumns('#age-chart',data.ages,{compact:true}); renderHours(data.hours);
   renderColumns('#newpeople-chart',data.new_people_by_okrug);
-  renderGeo(data); renderInterviewers(data.interviewers); renderRecent(data.recent);
+  renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;
   $('#updated-at').textContent = 'Обновлено в ' + new Date(data.generated_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
