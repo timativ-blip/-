@@ -1436,6 +1436,24 @@ def dashboard_detail(values, settings, kind, key, focus=DEFAULT_FOCUS, requested
             "subtitle": f"В выбранной области: {_fmt_int(len(scope))} анкет", **body}
 
 
+def build_map_data(day_rows):
+    """Per-TIK answer counts for the choropleth (day filter only, like the other territory blocks)."""
+    counts = defaultdict(Counter)
+    totals = Counter()
+    for row in day_rows:
+        if row["tik"] in TIK_TO_OKRUG:
+            totals[row["tik"]] += 1
+            counts[row["tik"]][row["answer"]] += 1
+    turnout = {}
+    if BASELINE:
+        for okrug, entry in BASELINE["okrugs"].items():
+            turnout[okrug] = {"turnout": round(entry["issued"] * 100 / entry["voters"], 1), "voters": entry["voters"]}
+    return {"tiks": [{"tik": tik, "okrug": TIK_TO_OKRUG[tik], "n": totals[tik],
+                      "answers": {label: counts[tik][label] for label in (*FORECAST_PARTIES, *SERVICE_ANSWERS) if counts[tik][label]}}
+                     for tik in sorted(TIK_TO_OKRUG, key=lambda t: (TIK_TO_OKRUG[t], t))],
+            "turnout_2021": turnout}
+
+
 def _swing_cell(hits, n, reference):
     cell = {"n": n, "y2021": reference, "poll": _share(hits, n) if n else None, "delta": None, "significant": False}
     if n >= DETAIL_MIN_N and reference is not None:
@@ -1669,7 +1687,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
                   "percent": round(ages[label] * 100 / total, 1) if total else 0} for label in AGES],
         "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
         "new_people_by_okrug": new_people_by_okrug, "new_people_by_age": new_people_by_age, "party_okrug": party_okrug, "party_age": party_age,
-        "swing": build_swing(okrug_rows),
+        "swing": build_swing(okrug_rows), "map": build_map_data(day_rows),
         "forecast": forecast_shares(rows, territory_weights(settings)),
         "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,

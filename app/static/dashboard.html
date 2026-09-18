@@ -84,6 +84,16 @@
 
       <section class="panel table-panel"><header><div><p class="kicker">ТЕПЛОВАЯ КАРТА</p><h2>Динамика к 2021</h2></div><span class="panel-note">опрос 2026 минус итоги Госдумы 2021, п.п.</span></header><div class="table-scroll"><table class="heatmap"><thead id="swing-head"></thead><tbody id="swing-body"></tbody></table></div><p class="panel-note table-note">Опрос — доля среди назвавших партию в округе. 2021 — итоги партийных списков (ЦИК), пересчитанные на те же партии. Жирным — разница вне 95%-й погрешности опроса; округа с числом ответивших меньше 30 не показаны. Это ориентир: список партий и способ голосования (ДЭГ) изменились, а опрос идёт только на участках.</p></section>
 
+      <section class="panel table-panel" id="map-panel"><header><div><p class="kicker">КАРТОГРАММА</p><h2>Территории области</h2></div><span class="panel-note">клик по территории выбирает её в фильтрах</span></header>
+        <div class="map-controls">
+          <div class="seg-group" role="group" aria-label="Слой карты"><button class="seg active" type="button" data-layer="share">Доля партии</button><button class="seg" type="button" data-layer="index">Индекс</button><button class="seg" type="button" data-layer="refusal">Отказы</button><button class="seg" type="button" data-layer="count">Анкеты</button><button class="seg" type="button" data-layer="turnout">Явка 2021</button></div>
+          <div class="seg-group" role="group" aria-label="Уровень"><button class="seg active" type="button" data-level="tik">ТИК</button><button class="seg" type="button" data-level="okrug">Округа</button></div>
+          <label class="focus-select">Партия<select id="map-focus" aria-label="Партия для слоёв «Доля» и «Индекс»"></select></label>
+        </div>
+        <div class="map-wrap"><div id="map" class="map"></div><div id="map-legend" class="map-legend"></div><div id="map-tip" class="map-tip" hidden></div></div>
+        <p class="panel-note table-note">Границы: © участники OpenStreetMap (ODbL). Территории с числом ответивших меньше 30 не закрашены. Явка 2026 по ТИК в открытых источниках не публикуется, поэтому слой «Явка 2021» показывает итоги Госдумы 2021 (ЦИК) по округам. Карта следует фильтру даты.</p>
+      </section>
+
       <section class="panel timeline-panel"><header><div><p class="kicker">ДИНАМИКА</p><h2>Анкеты по времени</h2></div><span class="panel-note">по времени заполнения</span></header><div id="hours-chart" class="hour-chart"></div></section>
 
       <section class="panel table-panel"><header><div><p class="kicker">ГЕОГРАФИЯ</p><h2 id="geo-title">Контроль по ТИК</h2></div><span class="panel-note">Нажмите строку, чтобы открыть участки</span></header><div class="table-scroll"><table><thead><tr><th>Территория</th><th>Анкет</th><th>Отказов</th><th>Испорчено</th><th id="geo-col5">УИК с данными</th><th>Интервьюеров</th><th>Доля</th></tr></thead><tbody id="geo-table"></tbody></table></div></section>

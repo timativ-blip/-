@@ -864,3 +864,29 @@ def test_okrug_analysis_has_2021_comparison(settings):
     assert any(r[0]["t"] == FOCUS and r[4]["t"] == "значимо выше" for r in section["tables"][0]["rows"])
     assert "К 2021 году" in texts(payload, "Позиция «Новые люди»")
     assert not any(sec["title"] == "К итогам 2021" for sec in detail(settings, rows, "age", "25–34")["sections"])
+
+
+def test_tik_map_boundaries_cover_every_tik():
+    import json
+    from pathlib import Path
+    path = Path(__file__).resolve().parent.parent / "app" / "static" / "tik_map.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert path.stat().st_size < 400_000
+    features = data["features"]
+    assert sorted(f["tik"] for f in features) == sorted(TIK_TO_OKRUG)
+    assert all(f["okrug"] == TIK_TO_OKRUG[f["tik"]] and f["polygons"] for f in features)
+    min_x, min_y, max_x, max_y = data["bbox"]
+    assert 34.5 < min_x < max_x < 40.5 and 54.0 < min_y < max_y < 57.0
+    assert "OpenStreetMap" in data["attribution"]
+
+
+def test_map_payload_counts_match_day_rows(settings):
+    rows = mk_rows(settings, [(BAL, 40, FOCUS, "Мужской", "25–34", "a"), (BAL, 10, "Отказался отвечать", "Мужской", "25–34", "b"),
+                              (DMI, 5, "Единая Россия", "Женский", "45–60", "c")])
+    payload = dashboard_snapshot(rows, settings, requested_day="2026-09-16")["map"]
+    assert len(payload["tiks"]) == len(TIK_TO_OKRUG) and len(payload["turnout_2021"]) == 12
+    bal = next(t for t in payload["tiks"] if t["tik"] == BAL)
+    assert bal["n"] == 50 and bal["answers"] == {FOCUS: 40, "Отказался отвечать": 10}
+    assert sum(t["n"] for t in payload["tiks"]) == 55
+    empty = dashboard_snapshot([], settings)["map"]
+    assert all(t["n"] == 0 and t["answers"] == {} for t in empty["tiks"])

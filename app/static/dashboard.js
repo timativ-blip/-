@@ -7,6 +7,11 @@ let interviewersTotal = 0;
 let anomalyPayload = null;
 let lastAgeHeat = null;
 let activeDetail = null;
+let mapGeo = null;
+let mapPayload = null;
+let mapLayer = 'share';
+let mapLevel = 'tik';
+let mapBuilt = false;
 let focusParty = 'Новые люди';
 try { focusParty = localStorage.getItem('focusParty') || focusParty; } catch { /* storage may be blocked */ }
 let showClosedAnomalies = false;
@@ -202,6 +207,7 @@ function focusOptions(parties) {
   const names = parties.map(p => p.label).filter(label => label !== 'Испортил бюллетень' && label !== 'Отказался отвечать');
   if (!names.includes(focusParty)) focusParty = names.includes('Новые люди') ? 'Новые люди' : names[0];
   select.innerHTML = names.map(name => option(name, name, focusParty)).join('');
+  $('#map-focus').innerHTML = select.innerHTML;
 }
 function markActiveBar() {
   document.querySelectorAll('[data-kind][data-key]').forEach(el => {
@@ -224,6 +230,102 @@ function renderSwing(swing) {
     el.style.background = `rgba(${delta >= 0 ? '70,99,77' : '217,120,98'}, ${0.08 + 0.72 * level})`;
     el.classList.toggle('heat-dark', level > 0.6);
   });
+}
+const MAP_MIN_N = 30;
+const MAP_NO_DATA = '#e6ebe1';
+function mixColor(from, to, t) { return `rgb(${from.map((c, i) => Math.round(c + (to[i] - c) * t)).join(',')})`; }
+function mapUnits() {
+  const named = counts => Object.entries(counts).filter(([label]) => label !== 'Испортил бюллетень' && label !== 'Отказался отвечать').reduce((sum, [, n]) => sum + n, 0);
+  const groups = new Map();
+  mapPayload.tiks.forEach(t => {
+    const key = mapLevel === 'tik' ? t.tik : t.okrug;
+    const unit = groups.get(key) || {key, label: mapLevel === 'tik' ? t.tik : `Округ ${t.okrug}`, okrug: t.okrug, n: 0, named: 0, votes: 0, refusals: 0, tiks: []};
+    unit.n += t.n; unit.named += named(t.answers); unit.votes += t.answers[focusParty] || 0; unit.refusals += t.answers['Отказался отвечать'] || 0; unit.tiks.push(t.tik);
+    groups.set(key, unit);
+  });
+  const all = [...groups.values()];
+  const totalNamed = all.reduce((s, u) => s + u.named, 0), totalVotes = all.reduce((s, u) => s + u.votes, 0);
+  const overall = totalNamed ? totalVotes / totalNamed : 0;
+  all.forEach(u => {
+    u.share = u.named ? u.votes * 100 / u.named : 0;
+    u.index = overall && u.named ? u.votes / u.named / overall * 100 : 0;
+    u.refusalRate = u.n ? u.refusals * 100 / u.n : 0;
+    u.turnout = mapPayload.turnout_2021[u.okrug]?.turnout ?? null;
+  });
+  return {units: all, overallShare: overall * 100};
+}
+const MAP_LAYERS = {
+  share: {value: u => u.named >= MAP_MIN_N ? u.share : null, format: v => `${v.toFixed(1)}%`, kind: 'seq', color: [70, 99, 77]},
+  index: {value: u => u.named >= MAP_MIN_N ? u.index : null, format: v => v.toFixed(0), kind: 'div'},
+  refusal: {value: u => u.n >= MAP_MIN_N ? u.refusalRate : null, format: v => `${v.toFixed(1)}%`, kind: 'seq', color: [217, 120, 98]},
+  count: {value: u => u.n || null, format: v => number(v), kind: 'seq', color: [95, 134, 163]},
+  turnout: {value: u => u.turnout, format: v => `${v.toFixed(1)}%`, kind: 'seq', color: [201, 162, 39]},
+};
+function projectMap() {
+  const [minX, minY, maxX, maxY] = mapGeo.bbox;
+  const k = Math.cos((minY + maxY) / 2 * Math.PI / 180), scale = 900 / ((maxX - minX) * k);
+  return {width: 900, height: Math.round((maxY - minY) * scale), point: ([x, y]) => `${((x - minX) * k * scale).toFixed(1)},${((maxY - y) * scale).toFixed(1)}`, at: ([x, y]) => [(x - minX) * k * scale, (maxY - y) * scale]};
+}
+function buildMap() {
+  const projection = projectMap();
+  const paths = mapGeo.features.map(f => `<path data-tik="${escapeHTML(f.tik)}" data-okrug="${escapeHTML(f.okrug)}" tabindex="0" role="button" aria-label="${escapeHTML(f.tik)}" fill="${MAP_NO_DATA}" fill-rule="evenodd" d="${f.polygons.map(poly => poly.map(ring => 'M' + ring.map(projection.point).join('L') + 'Z').join('')).join('')}"/>`).join('');
+  $('#map').innerHTML = `<svg viewBox="0 0 ${projection.width} ${projection.height}" role="img" aria-label="Картограмма Московской области по ТИК">${paths}<g id="map-labels"></g></svg>`;
+  mapBuilt = true;
+}
+function paintMap() {
+  if (!mapGeo || !mapPayload || !mapBuilt) return;
+  const {units, overallShare} = mapUnits();
+  const layer = MAP_LAYERS[mapLayer];
+  const byKey = new Map(units.map(u => [u.key, u]));
+  const values = units.map(layer.value).filter(v => v !== null);
+  const low = Math.min(...values), high = Math.max(...values), deviation = Math.max(1, ...values.map(v => Math.abs(v - 100)));
+  const color = value => {
+    if (value === null) return MAP_NO_DATA;
+    if (layer.kind === 'div') return mixColor([233, 239, 228], value >= 100 ? [70, 99, 77] : [217, 120, 98], Math.min(1, Math.abs(value - 100) / deviation));
+    return mixColor([238, 243, 233], layer.color, high === low ? 0.6 : 0.12 + 0.88 * (value - low) / (high - low));
+  };
+  $('#map svg').querySelectorAll('path[data-tik]').forEach(el => {
+    const unit = byKey.get(mapLevel === 'tik' ? el.dataset.tik : el.dataset.okrug);
+    el.setAttribute('fill', unit ? color(layer.value(unit)) : MAP_NO_DATA);
+  });
+  const projection = projectMap(), labels = [];
+  if (mapLevel === 'okrug') {
+    const byOkrug = {};
+    mapGeo.features.forEach(f => { (byOkrug[f.okrug] = byOkrug[f.okrug] || []).push(projection.at(f.label)); });
+    Object.entries(byOkrug).forEach(([okrug, points]) => {
+      const x = points.reduce((s, p) => s + p[0], 0) / points.length, y = points.reduce((s, p) => s + p[1], 0) / points.length;
+      labels.push(`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" class="map-label">${escapeHTML(okrug)}</text>`);
+    });
+  }
+  $('#map-labels').innerHTML = labels.join('');
+  const ramp = layer.kind === 'div' ? `linear-gradient(90deg, rgb(217,120,98), rgb(233,239,228), rgb(70,99,77))` : `linear-gradient(90deg, rgb(238,243,233), rgb(${layer.color.join(',')}))`;
+  const legend = $('#map-legend');
+  legend.innerHTML = `<span>${values.length ? layer.format(layer.kind === 'div' ? 100 - deviation : low) : '—'}</span><i></i><span>${values.length ? layer.format(layer.kind === 'div' ? 100 + deviation : high) : '—'}</span><em><b></b> нет данных</em>`;
+  legend.querySelector('i').style.background = ramp;
+  legend.querySelector('em b').style.background = MAP_NO_DATA;
+  $('#map-panel .panel-note.table-note').dataset.overall = overallShare.toFixed(1);
+}
+function mapTip(event) {
+  const path = event.target.closest?.('path[data-tik]'), tip = $('#map-tip');
+  if (!path || !mapPayload) { tip.hidden = true; return; }
+  const {units, overallShare} = mapUnits();
+  const unit = units.find(u => u.key === (mapLevel === 'tik' ? path.dataset.tik : path.dataset.okrug));
+  if (!unit) { tip.hidden = true; return; }
+  const small = unit.named < MAP_MIN_N;
+  tip.innerHTML = `<strong>${escapeHTML(mapLevel === 'tik' ? path.dataset.tik : unit.label)}</strong>${mapLevel === 'tik' ? `<span>Округ ${escapeHTML(unit.okrug)}</span>` : ''}<ul><li>Анкет: ${number(unit.n)} · назвали партию: ${number(unit.named)}</li><li>«${escapeHTML(focusParty)}»: ${small ? 'мало данных' : `${unit.share.toFixed(1)}% (индекс ${unit.index.toFixed(0)}, в области ${overallShare.toFixed(1)}%)`}</li><li>Отказы: ${unit.n >= MAP_MIN_N ? unit.refusalRate.toFixed(1) + '%' : 'мало данных'}</li>${unit.turnout !== null ? `<li>Явка 2021 (округ): ${unit.turnout}%</li>` : ''}</ul>`;
+  tip.hidden = false;
+  const box = tip.getBoundingClientRect();
+  tip.style.left = `${Math.min(window.innerWidth - box.width - 12, event.clientX + 16)}px`;
+  tip.style.top = `${Math.min(window.innerHeight - box.height - 12, event.clientY + 16)}px`;
+}
+async function initMap() {
+  if (mapGeo !== null) return;
+  try { mapGeo = await request('/static/tik_map.json'); } catch { mapGeo = false; }
+  if (mapGeo) { buildMap(); paintMap(); } else $('#map').innerHTML = '<p class="empty">Границы территорий недоступны</p>';
+}
+function renderMap(payload) {
+  mapPayload = payload;
+  if (mapGeo === null) void initMap(); else paintMap();
 }
 function renderSummary(summary) {
   const cards = [
@@ -359,7 +461,7 @@ function renderFilters(data) {
 function render(data) {
   renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties,{kind:'party'});
   renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender'}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
-  renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderForecast(data.forecast, data.summary);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderMap(data.map); renderForecast(data.forecast, data.summary);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;
@@ -424,9 +526,31 @@ document.addEventListener('keydown', event => {
 });
 $('#focus-party').addEventListener('change', event => {
   focusParty = event.target.value;
+  $('#map-focus').value = focusParty; paintMap();
   try { localStorage.setItem('focusParty', focusParty); } catch { /* storage may be blocked */ }
   void refreshDetail(true);
 });
+document.querySelectorAll('.seg').forEach(button => button.addEventListener('click', () => {
+  if (button.dataset.layer) mapLayer = button.dataset.layer; else mapLevel = button.dataset.level;
+  document.querySelectorAll(`.seg[data-${button.dataset.layer ? 'layer' : 'level'}]`).forEach(other => other.classList.toggle('active', other === button));
+  paintMap();
+}));
+$('#map-focus').addEventListener('change', event => {
+  focusParty = event.target.value;
+  try { localStorage.setItem('focusParty', focusParty); } catch { /* storage may be blocked */ }
+  $('#focus-party').value = focusParty;
+  paintMap();
+  void refreshDetail(true);
+});
+$('#map').addEventListener('mousemove', mapTip);
+$('#map').addEventListener('mouseleave', () => { $('#map-tip').hidden = true; });
+$('#map').addEventListener('click', event => {
+  const path = event.target.closest('path[data-tik]');
+  if (!path) return;
+  filters.okrug = path.dataset.okrug; filters.tik = mapLevel === 'tik' ? path.dataset.tik : ''; filters.precinct = '';
+  void load();
+});
+$('#map').addEventListener('keydown', event => { if ((event.key === 'Enter' || event.key === ' ') && event.target.matches?.('path[data-tik]')) { event.preventDefault(); event.target.dispatchEvent(new MouseEvent('click', {bubbles: true})); } });
 $('#anomaly-show-closed').addEventListener('change', event => { showClosedAnomalies = event.target.checked; renderAnomalies(); });
 $('#anomalies').addEventListener('focusout', () => setTimeout(() => { if (anomalyRenderPending && !anomalyEditing()) renderAnomalies(); }, 0));
 $('#anomalies').addEventListener('click', async event => {
