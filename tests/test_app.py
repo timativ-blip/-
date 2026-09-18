@@ -599,3 +599,18 @@ def test_anomaly_status_requires_sheet(settings):
         client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
         response = client.post("/api/dashboard/anomalies/status", json={"id": "0" * 16, "status": "open"})
         assert response.status_code == 503
+
+
+def test_new_people_by_age(settings):
+    rows = shift_rows(settings, 10,
+                      answer=lambda i: "Новые люди" if i < 3 else "КПРФ",
+                      age=lambda i: "25–34" if i < 4 else "61+")
+    result = dashboard_snapshot(rows, settings, requested_day="2026-09-16")["new_people_by_age"]
+    assert [g["label"] for g in result] == ["18–24", "25–34", "35–44", "45–60", "61+"]
+    young = next(g for g in result if g["label"] == "25–34")
+    old = next(g for g in result if g["label"] == "61+")
+    assert (young["count"], young["total"], young["percent"]) == (3, 4, 75.0)
+    assert (old["count"], old["total"], old["percent"]) == (0, 6, 0)
+    assert next(g for g in result if g["label"] == "18–24") == {"label": "18–24", "count": 0, "total": 0, "percent": 0}
+    other_day = dashboard_snapshot(rows, settings, requested_day="2026-09-15")["new_people_by_age"]
+    assert all(g["total"] == 0 for g in other_day)

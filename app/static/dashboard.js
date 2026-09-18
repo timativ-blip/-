@@ -39,13 +39,28 @@ function renderColumns(target, items, {compact = false} = {}) {
   const max = Math.max(1, ...items.map(x => x.count));
   const maxHeight = compact ? 90 : 150;
   const box = $(target);
-  box.innerHTML = `<div class="columns${compact ? ' compact' : ''}">${items.map(item => `<div class="column"><div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="column-bar"></div><div class="column-label" title="${escapeHTML(item.label)}">${escapeHTML(item.label)}</div></div>`).join('')}</div>`;
+  box.innerHTML = `<div class="columns${compact ? ' compact' : ''}">${items.map(item => `<div class="column"><div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="column-bar"></div><div class="column-label" title="${escapeHTML(item.title || item.label)}">${escapeHTML(item.label)}</div></div>`).join('')}</div>`;
   // CSP (style-src 'self', no unsafe-inline) drops style="" written via innerHTML;
   // assigning through the DOM style API below is unaffected and actually renders the bar height.
   box.querySelectorAll('.column-bar').forEach((el, index) => {
     const item = items[index];
     el.style.height = (item.count ? Math.max(4, item.count / max * maxHeight) : 0) + 'px';
   });
+}
+function renderNewPeopleAge(groups) {
+  renderColumns('#newpeople-age-chart', groups.map(g => ({...g, title: `${g.label}: ${number(g.count)} из ${number(g.total)} анкет`})));
+  const votes = groups.reduce((sum, g) => sum + g.count, 0);
+  const enough = groups.filter(g => g.total >= 20);
+  const byRate = [...enough].sort((a, b) => b.percent - a.percent)[0];
+  const byVotes = [...groups].sort((a, b) => b.count - a.count)[0];
+  const parts = [];
+  if (!votes) parts.push('Пока нет голосов за «Новых людей»');
+  else {
+    if (byRate) parts.push(`Чаще всего голосует группа ${byRate.label}: ${byRate.percent}% её анкет`);
+    else parts.push('Мало данных: в каждой группе меньше 20 анкет');
+    parts.push(`больше всего голосов у ${byVotes.label}: ${number(byVotes.count)}`);
+  }
+  $('#newpeople-age-insight').textContent = parts.join(' · ');
 }
 function renderSummary(summary) {
   const cards = [
@@ -181,7 +196,7 @@ function renderFilters(data) {
 function render(data) {
   renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties);
   renderColumns('#gender-chart',data.genders,{compact:true}); renderColumns('#age-chart',data.ages,{compact:true}); renderHours(data.hours);
-  renderColumns('#newpeople-chart',data.new_people_by_okrug); renderHeatmap(data.party_okrug);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;

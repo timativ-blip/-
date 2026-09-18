@@ -536,6 +536,15 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
             "percent": round(count * 100 / okrug_total, 1) if okrug_total else 0,
         })
 
+    new_people_by_age = []
+    for age in AGES:
+        group = [row for row in filtered if row["age"] == age]
+        votes = sum(row["answer"] == "Новые люди" for row in group)
+        new_people_by_age.append({
+            "label": age, "count": votes, "total": len(group),
+            "percent": round(votes * 100 / len(group), 1) if group else 0,
+        })
+
     tik_stats = []
     if requested_okrug:
         tik_rows = defaultdict(list)
@@ -675,7 +684,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
         "ages": [{"label": label, "count": ages[label],
                   "percent": round(ages[label] * 100 / total, 1) if total else 0} for label in AGES],
         "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
-        "new_people_by_okrug": new_people_by_okrug, "party_okrug": party_okrug, "anomalies": anomalies,
+        "new_people_by_okrug": new_people_by_okrug, "new_people_by_age": new_people_by_age, "party_okrug": party_okrug, "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,
     }
