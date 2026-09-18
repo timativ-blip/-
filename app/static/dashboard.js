@@ -16,6 +16,7 @@ async function request(url, options = {}) {
 function option(value, label, selected) { return `<option value="${escapeHTML(value)}"${value === selected ? ' selected' : ''}>${escapeHTML(label)}</option>`; }
 function number(value) { return new Intl.NumberFormat('ru-RU').format(value || 0); }
 function dateLabel(value) {
+  if (value === 'all') return 'Все дни';
   if (!value) return 'Нет данных';
   return new Intl.DateTimeFormat('ru-RU', {day:'numeric',month:'long',year:'numeric'}).format(new Date(value + 'T12:00:00'));
 }
@@ -25,9 +26,17 @@ function showLogin(message = '') {
 function showDashboard() { $('#login-view').hidden = true; $('#dashboard').hidden = false; }
 function status(kind, text) { $('#live-status').className = `live ${kind}`; $('#live-status span').textContent = text; }
 
-function renderBars(target, items) {
+function renderColumns(target, items, {compact = false} = {}) {
   const max = Math.max(1, ...items.map(x => x.count));
-  $(target).innerHTML = items.map(item => `<div class="bar-row"><div class="bar-label" title="${escapeHTML(item.label)}">${escapeHTML(item.label)}</div><div class="track"><div class="fill" style="width:${item.count ? Math.max(2,item.count/max*100) : 0}%"></div></div><div class="bar-value"><strong>${number(item.count)}</strong>${item.percent}%</div></div>`).join('');
+  const maxHeight = compact ? 90 : 150;
+  const box = $(target);
+  box.innerHTML = `<div class="columns${compact ? ' compact' : ''}">${items.map(item => `<div class="column"><div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="column-bar"></div><div class="column-label" title="${escapeHTML(item.label)}">${escapeHTML(item.label)}</div></div>`).join('')}</div>`;
+  // CSP (style-src 'self', no unsafe-inline) drops style="" written via innerHTML;
+  // assigning through the DOM style API below is unaffected and actually renders the bar height.
+  box.querySelectorAll('.column-bar').forEach((el, index) => {
+    const item = items[index];
+    el.style.height = (item.count ? Math.max(4, item.count / max * maxHeight) : 0) + 'px';
+  });
 }
 function renderSummary(summary) {
   const cards = [
@@ -42,20 +51,24 @@ function renderSummary(summary) {
 }
 function renderHours(items) {
   const max = Math.max(1, ...items.map(x => x.count));
-  $('#hours-chart').innerHTML = items.map(item => `<div class="hour"><b>${item.count || ''}</b><i style="height:${Math.max(3,item.count/max*145)}px"></i><span>${escapeHTML(item.hour.slice(0,2))}</span></div>`).join('');
+  const box = $('#hours-chart');
+  box.innerHTML = items.map(item => `<div class="hour"><b>${item.count || ''}</b><i></i><span>${escapeHTML(item.hour.slice(0,2))}</span></div>`).join('');
+  box.querySelectorAll('.hour i').forEach((el, index) => { el.style.height = Math.max(3, items[index].count / max * 145) + 'px'; });
 }
 function renderGeo(data) {
   const uikMode = Boolean(filters.tik);
   $('#geo-title').textContent = uikMode ? 'Контроль по УИК' : 'Контроль по ТИК';
   const items = uikMode ? data.uik_stats : data.tik_stats;
   const max = Math.max(1, ...items.map(x => x.total));
-  $('#geo-table').innerHTML = items.length ? items.map(item => {
+  const table = $('#geo-table');
+  table.innerHTML = items.length ? items.map(item => {
     const name = uikMode ? item.label : item.tik;
     const cells = uikMode
       ? `<td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(item.spoiled)}</td><td>${item.total ? '1' : '0'}</td><td>${number(item.interviewers)}</td>`
       : `<td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(item.spoiled)}</td><td>${number(item.uiks)}</td><td>${number(item.interviewers)}</td>`;
-    return `<tr class="${uikMode ? '' : 'clickable'}" ${uikMode ? '' : `data-tik="${escapeHTML(item.tik)}"`}><td class="territory">${escapeHTML(name)}</td>${cells}<td><div class="share"><i style="width:${item.total/max*70}px"></i><span>${data.summary.total ? Math.round(item.total*100/data.summary.total) : 0}%</span></div></td></tr>`;
+    return `<tr class="${uikMode ? '' : 'clickable'}" ${uikMode ? '' : `data-tik="${escapeHTML(item.tik)}"`}><td class="territory">${escapeHTML(name)}</td>${cells}<td><div class="share"><i></i><span>${data.summary.total ? Math.round(item.total*100/data.summary.total) : 0}%</span></div></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">За выбранный период данных нет</td></tr>';
+  table.querySelectorAll('.share i').forEach((el, index) => { el.style.width = (items[index].total / max * 70) + 'px'; });
   document.querySelectorAll('#geo-table tr[data-tik]').forEach(row => row.addEventListener('click', () => { filters.tik = row.dataset.tik; filters.precinct = ''; load(); }));
 }
 function renderInterviewers(items) {
@@ -66,14 +79,17 @@ function renderRecent(items) {
 }
 function renderFilters(data) {
   filters.day = data.selected_day; filters.tik = data.selected_tik; filters.precinct = data.selected_precinct;
-  $('#day').innerHTML = data.available_dates.length ? data.available_dates.map(day => option(day,dateLabel(day),filters.day)).join('') : option(filters.day,dateLabel(filters.day),true);
+  const dayOptions = data.available_dates.length
+    ? data.available_dates.map(day => option(day,dateLabel(day),filters.day)).join('')
+    : (filters.day !== 'all' ? option(filters.day,dateLabel(filters.day),filters.day) : '');
+  $('#day').innerHTML = option('all','Все дни',filters.day) + dayOptions;
   $('#tik').innerHTML = option('','Все ТИК',filters.tik) + data.filters.tiks.map(tik => option(tik,tik,filters.tik)).join('');
   $('#precinct').innerHTML = option('','Все УИК',filters.precinct) + data.filters.precincts.map(p => option(p.id,p.label,filters.precinct)).join('');
   $('#precinct').disabled = !filters.tik;
 }
 function render(data) {
-  renderFilters(data); renderSummary(data.summary); renderBars('#party-chart',data.parties);
-  renderBars('#gender-chart',data.genders); renderBars('#age-chart',data.ages); renderHours(data.hours);
+  renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties);
+  renderColumns('#gender-chart',data.genders,{compact:true}); renderColumns('#age-chart',data.ages,{compact:true}); renderHours(data.hours);
   renderGeo(data); renderInterviewers(data.interviewers); renderRecent(data.recent);
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${filters.tik ? ' · ' + filters.tik : ''}`;
   $('#updated-at').textContent = 'Обновлено в ' + new Date(data.generated_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});

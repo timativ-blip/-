@@ -40,6 +40,7 @@ AGES = ["18–24", "25–34", "35–44", "45–60", "61+"]
 HEADERS = ["ID анкеты", "Время заполнения", "Дата смены", "Фамилия интервьюера",
            "Имя интервьюера", "ID УИК", "УИК", "Ответ", "Пол", "Возраст",
            "ID смены", "Получено сервером", "ТИК"]
+ALL_DAYS = "all"
 
 
 class Settings:
@@ -261,7 +262,8 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None,
 
     dates = sorted({row["day"] for row in rows if re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["day"])}, reverse=True)
     selected_day = requested_day or (dates[0] if dates else datetime.now(settings.zone).date().isoformat())
-    filtered = [row for row in rows if row["day"] == selected_day]
+    day_rows = rows if selected_day == ALL_DAYS else [row for row in rows if row["day"] == selected_day]
+    filtered = day_rows
     if requested_tik:
         filtered = [row for row in filtered if row["tik"] == requested_tik]
     if requested_precinct:
@@ -275,7 +277,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None,
 
     catalog_tiks = sorted({p.get("tik", "") for p in settings.precincts if p.get("tik")})
     tik_rows = defaultdict(list)
-    for row in [r for r in rows if r["day"] == selected_day]:
+    for row in day_rows:
         tik_rows[row["tik"]].append(row)
     tik_stats = []
     for tik in catalog_tiks:
@@ -293,7 +295,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_tik=None,
     uik_stats = []
     if requested_tik:
         by_uik = defaultdict(list)
-        for row in [r for r in rows if r["day"] == selected_day and r["tik"] == requested_tik]:
+        for row in [r for r in day_rows if r["tik"] == requested_tik]:
             by_uik[row["precinct_id"]].append(row)
         for precinct in [p for p in settings.precincts if p.get("tik") == requested_tik]:
             items = by_uik.get(precinct["id"], [])
@@ -517,7 +519,7 @@ def create_app(settings=None):
 
     @app.get("/api/dashboard/data", dependencies=[Depends(dashboard_authorized)])
     def dashboard_data(day: str | None = None, tik: str | None = None, precinct: str | None = None):
-        if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        if day and day != ALL_DAYS and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
             raise HTTPException(422, "Неверная дата")
         if tik and tik not in {p.get("tik") for p in settings.precincts}:
             raise HTTPException(422, "Неизвестный ТИК")

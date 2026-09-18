@@ -190,6 +190,35 @@ def test_dashboard_aggregates_sheet_rows(settings):
     assert precinct_result["uik_stats"][0]["spoiled"] == 0
 
 
+def test_dashboard_all_days_combines_totals(settings):
+    tik = settings.precincts[0]["tik"]
+    precinct = settings.precincts[0]
+    values = [
+        ["one", "2026-09-15T08:30:00+00:00", "2026-09-15", "Иванова", "Анна",
+         precinct["id"], precinct["label"], "Новые люди", "Женский", "25–34", "shift-1", "", tik],
+        ["two", "2026-09-16T09:00:00+00:00", "2026-09-16", "Иванова", "Анна",
+         precinct["id"], precinct["label"], "Отказался отвечать", "Мужской", "45–60", "shift-1", "", tik],
+    ]
+    single_day = dashboard_snapshot(values, settings, requested_day="2026-09-16")
+    assert single_day["summary"]["total"] == 1
+    all_days = dashboard_snapshot(values, settings, requested_day="all")
+    assert all_days["selected_day"] == "all"
+    assert all_days["summary"]["total"] == 2
+    assert next(x for x in all_days["parties"] if x["label"] == "Новые люди")["count"] == 1
+    assert all_days["tik_stats"][0]["total"] == 2
+
+
+def test_dashboard_all_days_accepted_by_endpoint(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    monkeypatch.setattr("app.main.read_sheet", lambda _: [])
+    with TestClient(create_app(settings)) as client:
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        response = client.get("/api/dashboard/data?day=all")
+        assert response.status_code == 200
+        assert response.json()["selected_day"] == "all"
+
+
 def test_dashboard_uses_separate_code(settings, monkeypatch):
     settings.dashboard_code = "coordinator-secret"
     settings.access_code = "interviewer-code"
