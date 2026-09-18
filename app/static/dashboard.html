@@ -59,11 +59,22 @@
 
       <section class="panel newpeople-panel"><header><div><p class="kicker">НОВЫЕ ЛЮДИ</p><h2>Голоса по округам</h2></div><span class="panel-note">число и доля от анкет округа</span></header><div id="newpeople-chart"></div></section>
 
+      <section class="panel table-panel"><header><div><p class="kicker">ТЕПЛОВАЯ КАРТА</p><h2>Партия × округ</h2></div><span class="panel-note">доля от анкет округа · яркость — относительно максимума в строке</span></header><div class="table-scroll"><table class="heatmap"><thead id="heatmap-head"></thead><tbody id="heatmap-body"></tbody></table></div></section>
+
       <section class="panel timeline-panel"><header><div><p class="kicker">ДИНАМИКА</p><h2>Анкеты по времени</h2></div><span class="panel-note">по времени заполнения</span></header><div id="hours-chart" class="hour-chart"></div></section>
 
       <section class="panel table-panel"><header><div><p class="kicker">ГЕОГРАФИЯ</p><h2 id="geo-title">Контроль по ТИК</h2></div><span class="panel-note">Нажмите строку, чтобы открыть участки</span></header><div class="table-scroll"><table><thead><tr><th>Территория</th><th>Анкет</th><th>Отказов</th><th>Испорчено</th><th id="geo-col5">УИК с данными</th><th>Интервьюеров</th><th>Доля</th></tr></thead><tbody id="geo-table"></tbody></table></div></section>
 
-      <section class="panel table-panel"><header><div><p class="kicker">КОМАНДА</p><h2>Работа интервьюеров</h2></div><input id="interviewer-search" class="search-input" type="search" placeholder="Поиск по ФИО"></header><div class="table-scroll"><table><thead><tr><th>Интервьюер</th><th>Участок</th><th>Анкет</th><th>Отказов</th><th>Успешно</th><th>% отказов</th><th>Доля</th></tr></thead><tbody id="interviewers"></tbody></table></div></section>
+      <section class="panel table-panel"><header><div><p class="kicker">КОМАНДА</p><h2>Работа интервьюеров</h2></div><input id="interviewer-search" class="search-input" type="search" placeholder="Поиск по ФИО"></header>
+        <div class="range-filters" aria-label="Фильтры интервьюеров">
+          <div class="range-group metric-success"><span>Успешно</span><input id="f-success-min" type="number" min="0" step="1" placeholder="от" aria-label="Успешно от"><input id="f-success-max" type="number" min="0" step="1" placeholder="до" aria-label="Успешно до"></div>
+          <div class="range-group metric-refusal"><span>% отказов</span><input id="f-refusal-min" type="number" min="0" max="100" step="1" placeholder="от" aria-label="Процент отказов от"><input id="f-refusal-max" type="number" min="0" max="100" step="1" placeholder="до" aria-label="Процент отказов до"></div>
+          <div class="range-group metric-share"><span>Доля, %</span><input id="f-share-min" type="number" min="0" max="100" step="0.1" placeholder="от" aria-label="Доля от"><input id="f-share-max" type="number" min="0" max="100" step="0.1" placeholder="до" aria-label="Доля до"></div>
+          <button id="f-reset" class="ghost-button" type="button">Сбросить фильтры</button>
+        </div>
+        <div class="table-scroll"><table><thead><tr><th>Интервьюер</th><th>Участок</th><th>Анкет</th><th>Отказов</th><th><button class="sort-button metric-success" type="button" data-sort="success">Успешно<span aria-hidden="true"></span></button></th><th><button class="sort-button metric-refusal" type="button" data-sort="refusal">% отказов<span aria-hidden="true"></span></button></th><th><button class="sort-button metric-share" type="button" data-sort="share">Доля<span aria-hidden="true"></span></button></th></tr></thead><tbody id="interviewers"></tbody></table></div></section>
+
+      <section class="panel table-panel"><header><div><p class="kicker">КОНТРОЛЬ КАЧЕСТВА</p><h2>Аномалии интервьюеров</h2><p id="anomaly-summary" class="subtle"></p></div><label class="switch"><input id="anomaly-show-closed" type="checkbox"><span class="switch-track"></span><span>Показывать закрытые</span></label></header><div id="anomaly-notice" class="alert" hidden>Не удалось прочитать статусы из вкладки «Аномалии»: закрытые аномалии могут временно показываться как открытые.</div><div id="anomalies" class="anomalies"></div></section>
 
       <section class="panel"><header><div><p class="kicker">ПОТОК</p><h2>Последние анкеты</h2></div></header><div id="recent" class="recent"></div></section>
     </main>

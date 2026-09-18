@@ -5,7 +5,11 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import OKRUGS, Settings, TIK_TO_OKRUG, connect, create_app, dashboard_snapshot, export_once
+import re
+from urllib.parse import unquote
+
+from app.main import (ANOMALY_HEADERS, OKRUGS, Settings, TIK_TO_OKRUG, connect, create_app, dashboard_snapshot,
+                      detect_anomalies, export_once, parse_sheet_rows, read_anomaly_statuses, write_anomaly_status)
 
 
 @pytest.fixture
@@ -17,6 +21,7 @@ def settings(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOGLE_SPREADSHEET_ID", "")
     monkeypatch.setenv("SMS_GATEWAY_URL", "")
     monkeypatch.setenv("SMS_GATEWAY_TOKEN", "")
+    monkeypatch.setattr("app.main.read_anomaly_statuses", lambda *_args, **_kwargs: {})
     return Settings()
 
 
@@ -396,3 +401,201 @@ def test_old_demo_queue_still_accepted(client, survey, settings):
     calls = []
     export_once(settings, calls.append)
     assert calls[0]['data'][1]['values'][0][-1] == ''
+
+
+PARTY_CYCLE = ["Единая Россия", "ЛДПР", "КПРФ", "Новые люди", "Зелёные", "Родина"]
+AGE_CYCLE = ["18–24", "25–34", "35–44", "45–60", "61+"]
+
+
+def _pick(value, default, index):
+    if value is None:
+        return default(index)
+    return value(index) if callable(value) else value
+
+
+def shift_rows(settings, count, shift="s1", name="Иван", start="2026-09-16T07:00:00+00:00", step=180,
+               answer=None, gender=None, age=None, delay=0, day="2026-09-16"):
+    precinct = settings.precincts[0]
+    base = datetime.fromisoformat(start)
+    rows = []
+    for i in range(count):
+        created = base + timedelta(seconds=step * i)
+        rows.append([
+            f"{shift}-{i}", created.isoformat(), day, "Тестов", name, precinct["id"], precinct["label"],
+            _pick(answer, lambda n: PARTY_CYCLE[n % 6], i),
+            _pick(gender, lambda n: ["Мужской", "Женский"][n % 2], i),
+            _pick(age, lambda n: AGE_CYCLE[n % 5], i),
+            shift, (created + timedelta(seconds=delay)).isoformat(), precinct["tik"]])
+    return rows
+
+
+def anomaly_rules(settings, rows):
+    return {item["rule"]: item for item in detect_anomalies(parse_sheet_rows(rows), settings)}
+
+
+def test_anomaly_clean_shift_has_none(settings):
+    assert anomaly_rules(settings, shift_rows(settings, 20)) == {}
+
+
+def test_anomaly_fast_entry(settings):
+    found = anomaly_rules(settings, shift_rows(settings, 8, step=5))
+    assert list(found) == ["fast"] and found["fast"]["severity"] == "high"
+
+
+def test_anomaly_identical_run(settings):
+    rows = shift_rows(settings, 20,
+                      answer=lambda i: "КПРФ" if 5 <= i < 11 else PARTY_CYCLE[i % 6],
+                      gender=lambda i: "Мужской" if 5 <= i < 11 else ["Мужской", "Женский"][i % 2],
+                      age=lambda i: "35–44" if 5 <= i < 11 else AGE_CYCLE[i % 5])
+    found = anomaly_rules(settings, rows)
+    assert found["run"]["severity"] == "medium" and "6 анкет подряд" in found["run"]["detail"]
+
+
+def test_anomaly_dominant_answer(settings):
+    found = anomaly_rules(settings, shift_rows(settings, 20, answer="Единая Россия"))
+    assert list(found) == ["dominant"] and found["dominant"]["severity"] == "high"
+
+
+def test_anomaly_uniform_respondents(settings):
+    found = anomaly_rules(settings, shift_rows(settings, 20, gender="Мужской", age="25–34"))
+    assert list(found) == ["uniform"]
+
+
+def test_anomaly_refusal_rate_vs_daily_average(settings):
+    rows = (shift_rows(settings, 20, shift="a", name="Иван", answer="Отказался отвечать")
+            + shift_rows(settings, 40, shift="b", name="Пётр"))
+    found = {item["interviewer"]: item for item in detect_anomalies(parse_sheet_rows(rows), settings)
+             if item["rule"] == "refusals"}
+    assert found["Тестов Иван"]["severity"] == "high"
+    assert "Тестов Пётр" in found
+
+
+def test_anomaly_outside_working_hours(settings):
+    found = anomaly_rules(settings, shift_rows(settings, 4, start="2026-09-16T20:00:00+00:00"))
+    assert list(found) == ["hours"] and found["hours"]["severity"] == "medium"
+
+
+def test_anomaly_late_sync(settings):
+    found = anomaly_rules(settings, shift_rows(settings, 3, delay=13 * 3600))
+    assert list(found) == ["late"]
+
+
+def test_anomaly_scope_ids_and_statuses(settings):
+    rows = shift_rows(settings, 8, step=5)
+    okrug = TIK_TO_OKRUG[settings.precincts[0]["tik"]]
+    other = next(o for o in OKRUGS if o != okrug)
+    base = dashboard_snapshot(rows, settings, requested_day="2026-09-16")["anomalies"]
+    assert base["open"] == 1 and base["closed"] == 0
+    item = base["items"][0]
+    assert dashboard_snapshot(rows, settings, requested_day="all", requested_okrug=okrug)["anomalies"]["items"][0]["id"] == item["id"]
+    assert dashboard_snapshot(rows, settings, requested_day="2026-09-15")["anomalies"]["items"] == []
+    assert dashboard_snapshot(rows, settings, requested_day="all", requested_okrug=other)["anomalies"]["items"] == []
+    closed = dashboard_snapshot(rows, settings, requested_day="2026-09-16",
+                                statuses={item["id"]: {"status": "resolved", "note": "проверено", "updated_at": "x"}})["anomalies"]
+    assert closed["open"] == 0 and closed["closed"] == 1
+    assert closed["items"][0]["status"] == "resolved" and closed["items"][0]["note"] == "проверено"
+
+
+def test_party_okrug_heatmap(settings):
+    balashikha = next(p for p in settings.precincts if p["tik"] == "ТИК города Балашиха")
+    dmitrov = next(p for p in settings.precincts if p["tik"] == "ТИК города Дмитров")
+
+    def row(i, precinct, answer):
+        return [f"r{i}", "2026-09-16T08:00:00+00:00", "2026-09-16", "А", "Б", precinct["id"], precinct["label"],
+                answer, "Мужской", "25–34", "s1", "", precinct["tik"]]
+    rows = [row(1, balashikha, "Единая Россия"), row(2, balashikha, "Новые люди"),
+            row(3, balashikha, "Отказался отвечать"), row(4, dmitrov, "Единая Россия")]
+    heat = dashboard_snapshot(rows, settings, requested_day="2026-09-16")["party_okrug"]
+    assert len(heat["okrugs"]) == 12
+    assert next(o for o in heat["okrugs"] if o["okrug"] == "118")["total"] == 3
+    labels = [r["label"] for r in heat["rows"]]
+    assert labels[0] == "Единая Россия" and labels[-2:] == ["Испортил бюллетень", "Отказался отвечать"]
+    assert "Яблоко" not in labels
+    cell = heat["rows"][0]["cells"][0]
+    assert cell == {"count": 1, "percent": 33.3}
+
+
+class FakeResponse:
+    def __init__(self, payload=None, status=200):
+        self.payload, self.status_code = payload or {}, status
+
+    def json(self):
+        return self.payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class FakeSheetsSession:
+    """Just enough of the Sheets API for the anomaly tab."""
+
+    def __init__(self):
+        self.titles, self.rows, self.value_posts = set(), {}, []
+
+    def get(self, url, timeout=None):
+        if "fields=sheets.properties.title" in url:
+            return FakeResponse({"sheets": [{"properties": {"title": t}} for t in sorted(self.titles)]})
+        target = unquote(url.split("/values/")[1])
+        if "Аномалии" not in self.titles:
+            return FakeResponse(status=400)
+        width = 1 if target.endswith("A2:A") else 4
+        last = max(self.rows, default=1)
+        return FakeResponse({"values": [(self.rows.get(n) or [])[:width] for n in range(2, last + 1)]})
+
+    def post(self, url, json=None, timeout=None):
+        if url.endswith("/values:batchUpdate"):
+            self.value_posts.append(json)
+            for entry in json["data"]:
+                number = int(re.search(r"!A(\d+):I", entry["range"]).group(1))
+                self.rows[number] = entry["values"][0]
+        else:
+            self.titles.add(json["requests"][0]["addSheet"]["properties"]["title"])
+        return FakeResponse()
+
+
+def test_anomaly_statuses_roundtrip_in_google_tab(settings):
+    settings.spreadsheet = "sheet-id"
+    session = FakeSheetsSession()
+    assert read_anomaly_statuses(settings, session) == {}
+    record = {"id": "a" * 16, "status": "clarified", "note": "Звонили", "updated_at": "2026-09-16T12:00:00+03:00",
+              "interviewer": "Тестов Иван", "rule": "fast", "day": "2026-09-16", "tik": "ТИК", "precinct": "УИК № 1"}
+    write_anomaly_status(settings, record, session)
+    assert "Аномалии" in session.titles and session.rows[1] == ANOMALY_HEADERS
+    assert read_anomaly_statuses(settings, session) == {
+        "a" * 16: {"status": "clarified", "note": "Звонили", "updated_at": "2026-09-16T12:00:00+03:00"}}
+    write_anomaly_status(settings, {**record, "status": "resolved", "note": '=IMPORTXML("x")'}, session)
+    write_anomaly_status(settings, {**record, "id": "b" * 16}, session)
+    assert sorted(session.rows) == [1, 2, 3]
+    assert session.rows[2][1] == "Устранена" and session.rows[2][2].startswith("=IMPORTXML")
+    assert all(post["valueInputOption"] == "RAW" for post in session.value_posts)
+
+
+def test_anomaly_status_endpoint(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    rows = shift_rows(settings, 8, step=5)
+    saved = []
+    monkeypatch.setattr("app.main.read_sheet", lambda _: rows)
+    monkeypatch.setattr("app.main.write_anomaly_status", lambda _s, record, session=None: saved.append(record))
+    with TestClient(create_app(settings)) as client:
+        payload = {"id": "0" * 16, "status": "resolved"}
+        assert client.post("/api/dashboard/anomalies/status", json=payload).status_code == 401
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        item = client.get("/api/dashboard/data", params={"day": "2026-09-16"}).json()["anomalies"]["items"][0]
+        assert client.post("/api/dashboard/anomalies/status", json=payload).status_code == 404
+        assert client.post("/api/dashboard/anomalies/status", json={"id": "bad", "status": "resolved"}).status_code == 422
+        ok = client.post("/api/dashboard/anomalies/status",
+                         json={"id": item["id"], "status": "clarified", "note": "Звонили, всё в порядке"})
+        assert ok.status_code == 200
+        assert saved[0]["status"] == "clarified" and saved[0]["interviewer"] == item["interviewer"]
+        anomalies = client.get("/api/dashboard/data", params={"day": "2026-09-16"}).json()["anomalies"]
+        assert anomalies["open"] == 0 and anomalies["items"][0]["status"] == "clarified"
+
+
+def test_anomaly_status_requires_sheet(settings):
+    settings.dashboard_code = "coordinator-secret"
+    with TestClient(create_app(settings)) as client:
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        response = client.post("/api/dashboard/anomalies/status", json={"id": "0" * 16, "status": "open"})
+        assert response.status_code == 503

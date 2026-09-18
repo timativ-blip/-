@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -14,6 +15,7 @@ from collections import Counter, defaultdict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 from urllib.parse import quote
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -87,6 +89,7 @@ class Settings:
         self.refusal_demographics = os.getenv("REFUSAL_DEMOGRAPHICS", "true").lower() == "true"
         self.spreadsheet = os.getenv("GOOGLE_SPREADSHEET_ID", "")
         self.sheet = os.getenv("GOOGLE_SHEET_NAME", "Анкеты")
+        self.anomaly_sheet = os.getenv("GOOGLE_ANOMALY_SHEET_NAME", "Аномалии")
         self.dashboard_code = os.getenv("DASHBOARD_CODE", "")
         self.sms_url = os.getenv("SMS_GATEWAY_URL", "")
         self.sms_token = os.getenv("SMS_GATEWAY_TOKEN", "")
@@ -165,6 +168,12 @@ class Login(StrictModel):
 
 class DashboardLogin(StrictModel):
     code: str = Field(min_length=1, max_length=200)
+
+
+class AnomalyStatus(StrictModel):
+    id: str = Field(pattern=r"^[0-9a-f]{16}$")
+    status: str = Field(pattern=r"^(open|clarified|resolved)$")
+    note: str = Field(default="", max_length=500)
 
 
 class SmsRequest(StrictModel):
@@ -271,9 +280,32 @@ def read_sheet(settings):
         return response.json().get("values", [])
 
 
-def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
-                        requested_tik=None, requested_precinct=None):
-    """Build a small, privacy-conscious aggregate from rows in Google Sheets."""
+ANOMALY_STATUS_LABELS = {"open": "Открыта", "clarified": "Уточнена", "resolved": "Устранена"}
+ANOMALY_STATUS_CODES = {label: code for code, label in ANOMALY_STATUS_LABELS.items()}
+ANOMALY_HEADERS = ["ID аномалии", "Статус", "Комментарий", "Обновлено", "Интервьюер",
+                   "Правило", "Дата смены", "ТИК", "УИК"]
+ANOMALY_RULES = {
+    "fast": "Слишком быстрый темп",
+    "run": "Одинаковые ответы подряд",
+    "dominant": "Один ответ почти во всех анкетах",
+    "uniform": "Однородные респонденты",
+    "refusals": "Аномальный процент отказов",
+    "hours": "Анкеты вне рабочего времени",
+    "late": "Поздняя отправка",
+}
+FAST_GAP_SECONDS = 20
+RUN_MIN = 5
+DOMINANT_MIN_ANSWERS = 15
+DOMINANT_SHARE = 0.9
+UNIFORM_SHARE = 0.8
+REFUSAL_MIN_SURVEYS = 15
+REFUSAL_Z = 3.5
+WORK_START_HOUR, WORK_END_HOUR = 8, 21
+LATE_HOURS = 12
+SHEETS_WRITE_SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
+
+
+def parse_sheet_rows(values):
     rows = []
     for source in values:
         row = list(source[:13]) + [""] * max(0, 13 - len(source))
@@ -286,6 +318,176 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
             "age": str(row[9]), "shift_id": str(row[10]), "received_at": str(row[11]),
             "tik": str(row[12]),
         })
+    return rows
+
+
+def parse_moment(value):
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def detect_anomalies(rows, settings):
+    """Flag interviewer shifts (one interviewer on one day) whose data looks unusual.
+
+    Deliberately independent of dashboard filters so an anomaly keeps the same id and verdict
+    whatever the coordinator is currently looking at.
+    """
+    day_totals = defaultdict(lambda: [0, 0])
+    groups = defaultdict(list)
+    for row in rows:
+        refused = row["answer"] == "Отказался отвечать"
+        day_totals[row["day"]][0] += 1
+        day_totals[row["day"]][1] += refused
+        key = (row["shift_id"] or f'{row["surname"]}|{row["name"]}', row["day"])
+        groups[key].append((parse_moment(row["created_at"]), row))
+
+    found = []
+    for (shift_key, day), items in groups.items():
+        first = items[0][1]
+        n = len(items)
+        ordered = sorted((pair for pair in items if pair[0]), key=lambda pair: pair[0])
+
+        def add(rule, severity, detail):
+            found.append({
+                "id": hashlib.sha1(f"{rule}|{shift_key}|{day}".encode()).hexdigest()[:16],
+                "rule": rule, "severity": severity, "title": ANOMALY_RULES[rule], "detail": detail,
+                "interviewer": (first["surname"] + " " + first["name"]).strip(),
+                "day": day, "tik": first["tik"], "okrug": TIK_TO_OKRUG.get(first["tik"], ""),
+                "precinct_id": first["precinct_id"], "precinct": first["precinct"], "count": n,
+            })
+
+        if len(ordered) >= 6:
+            gaps = [(b[0] - a[0]).total_seconds() for a, b in zip(ordered, ordered[1:])]
+            fast = [gap for gap in gaps if gap < FAST_GAP_SECONDS]
+            ratio = len(fast) / len(gaps)
+            if len(fast) >= 3 and ratio >= 0.3:
+                add("fast", "high" if ratio >= 0.6 else "medium",
+                    f"{len(fast)} из {len(gaps)} интервалов между анкетами короче {FAST_GAP_SECONDS} с; "
+                    f"медиана {median(gaps):.0f} с")
+
+        sequence = [(row["answer"], row["gender"], row["age"]) for _, row in (ordered or items)]
+        longest = current = 0
+        previous = None
+        for triple in sequence:
+            current = current + 1 if triple == previous else 1
+            previous = triple
+            longest = max(longest, current)
+        if longest >= RUN_MIN:
+            add("run", "high" if longest >= 8 else "medium",
+                f"{longest} анкет подряд с одинаковыми ответом, полом и возрастом")
+
+        answered = [row["answer"] for _, row in items
+                    if row["answer"] not in ("Отказался отвечать", "Испортил бюллетень")]
+        if len(answered) >= DOMINANT_MIN_ANSWERS:
+            answer, count = Counter(answered).most_common(1)[0]
+            share = count / len(answered)
+            if share >= DOMINANT_SHARE:
+                add("dominant", "high" if share >= 0.97 else "medium",
+                    f"«{answer}» — {count} из {len(answered)} ответов ({share * 100:.0f}%)")
+
+        combos = [(row["gender"], row["age"]) for _, row in items if row["gender"] and row["age"]]
+        if len(combos) >= DOMINANT_MIN_ANSWERS:
+            combo, count = Counter(combos).most_common(1)[0]
+            share = count / len(combos)
+            if share >= UNIFORM_SHARE:
+                add("uniform", "medium",
+                    f"{share * 100:.0f}% респондентов — одна группа ({combo[0]}, {combo[1]}): "
+                    f"{count} из {len(combos)}")
+
+        total_day, refusals_day = day_totals[day]
+        baseline = refusals_day / total_day
+        if n >= REFUSAL_MIN_SURVEYS and 0 < baseline < 1:
+            rate = sum(row["answer"] == "Отказался отвечать" for _, row in items) / n
+            z = (rate - baseline) / math.sqrt(baseline * (1 - baseline) / n)
+            if abs(z) >= REFUSAL_Z:
+                add("refusals", "high" if abs(z) >= 5 else "medium",
+                    f"{rate * 100:.0f}% отказов при среднем {baseline * 100:.0f}% за день (анкет: {n})")
+
+        outside = sum(1 for moment, _ in ordered
+                      if not WORK_START_HOUR <= moment.astimezone(settings.zone).hour < WORK_END_HOUR)
+        if outside >= 3:
+            add("hours", "high" if outside >= 6 else "medium",
+                f"{outside} анкет создано вне {WORK_START_HOUR}:00–{WORK_END_HOUR}:00")
+
+        late = 0
+        for created, row in items:
+            received = parse_moment(row["received_at"])
+            if created and received and (received - created).total_seconds() > LATE_HOURS * 3600:
+                late += 1
+        if late >= 3:
+            add("late", "medium", f"{late} анкет попало на сервер позже чем через {LATE_HOURS} ч после заполнения")
+    return found
+
+
+def _google_call(session, callback):
+    if session is not None:
+        return callback(session)
+    import google.auth
+    from google.auth.transport.requests import AuthorizedSession
+    credentials, _ = google.auth.default(scopes=SHEETS_WRITE_SCOPE)
+    with AuthorizedSession(credentials) as live:
+        return callback(live)
+
+
+def read_anomaly_statuses(settings, session=None):
+    """id -> {status, note, updated_at} from the anomaly tab; empty while that tab does not exist."""
+    if not settings.spreadsheet:
+        return {}
+    base = f"https://sheets.googleapis.com/v4/spreadsheets/{quote(settings.spreadsheet, safe='')}"
+    ref = "'" + settings.anomaly_sheet.replace("'", "''") + "'"
+
+    def run(client):
+        response = client.get(f"{base}/values/{quote(ref + '!A2:D', safe='')}", timeout=20)
+        if response.status_code == 400:
+            return {}
+        response.raise_for_status()
+        statuses = {}
+        for values in response.json().get("values", []):
+            padded = list(values) + [""] * (4 - len(values))
+            code = ANOMALY_STATUS_CODES.get(str(padded[1]))
+            if padded[0] and code:
+                statuses[str(padded[0])] = {"status": code, "note": str(padded[2]), "updated_at": str(padded[3])}
+        return statuses
+    return _google_call(session, run)
+
+
+def write_anomaly_status(settings, record, session=None):
+    """Upsert one anomaly status row by id, creating the tab on first use. RAW: text never becomes a formula."""
+    if not settings.spreadsheet:
+        raise RuntimeError("Google Sheets is not configured")
+    base = f"https://sheets.googleapis.com/v4/spreadsheets/{quote(settings.spreadsheet, safe='')}"
+    ref = "'" + settings.anomaly_sheet.replace("'", "''") + "'"
+
+    def run(client):
+        meta = client.get(f"{base}?fields=sheets.properties.title", timeout=20)
+        meta.raise_for_status()
+        titles = {sheet["properties"]["title"] for sheet in meta.json().get("sheets", [])}
+        if settings.anomaly_sheet not in titles:
+            created = client.post(f"{base}:batchUpdate", timeout=20, json={
+                "requests": [{"addSheet": {"properties": {"title": settings.anomaly_sheet}}}]})
+            created.raise_for_status()
+        existing = client.get(f"{base}/values/{quote(ref + '!A2:A', safe='')}", timeout=20)
+        existing.raise_for_status()
+        ids = existing.json().get("values", [])
+        positions = {str(values[0]): index + 2 for index, values in enumerate(ids) if values and values[0]}
+        number = positions.get(record["id"], len(ids) + 2)
+        row = [record["id"], ANOMALY_STATUS_LABELS[record["status"]], record["note"], record["updated_at"],
+               record["interviewer"], ANOMALY_RULES[record["rule"]], record["day"], record["tik"],
+               record["precinct"]]
+        body = {"valueInputOption": "RAW", "data": [
+            {"range": f"{ref}!A1:I1", "values": [ANOMALY_HEADERS]},
+            {"range": f"{ref}!A{number}:I{number}", "values": [row]}]}
+        client.post(f"{base}/values:batchUpdate", json=body, timeout=20).raise_for_status()
+    _google_call(session, run)
+
+
+def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
+                        requested_tik=None, requested_precinct=None, statuses=None):
+    """Build a small, privacy-conscious aggregate from rows in Google Sheets."""
+    rows = parse_sheet_rows(values)
 
     dates = sorted({row["day"] for row in rows if re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["day"])}, reverse=True)
     selected_day = requested_day or (dates[0] if dates else datetime.now(settings.zone).date().isoformat())
@@ -408,6 +610,47 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
             display_time = "—"
         recent.append({"time": display_time, "tik": row["tik"], "precinct": row["precinct"], "answer": row["answer"]})
 
+    service_answers = ("Испортил бюллетень", "Отказался отвечать")
+    okrug_answers = {okrug: Counter(row["answer"] for row in okrug_rows.get(okrug, [])) for okrug in OKRUGS}
+    heat_rows = []
+    for party_id, label in PARTIES:
+        if party_id == "2":
+            continue
+        cells = []
+        for okrug in sorted(OKRUGS):
+            okrug_total = len(okrug_rows.get(okrug, []))
+            count = okrug_answers[okrug][label]
+            cells.append({"count": count, "percent": round(count * 100 / okrug_total, 1) if okrug_total else 0})
+        heat_rows.append({"label": label, "total": sum(cell["count"] for cell in cells), "cells": cells})
+    party_okrug = {
+        "okrugs": [{"okrug": okrug, "total": len(okrug_rows.get(okrug, []))} for okrug in sorted(OKRUGS)],
+        "rows": sorted((r for r in heat_rows if r["label"] not in service_answers), key=lambda r: -r["total"])
+                + [r for r in heat_rows if r["label"] in service_answers],
+    }
+
+    statuses = statuses or {}
+    severity_rank = {"high": 0, "medium": 1}
+    anomaly_items = []
+    for item in detect_anomalies(rows, settings):
+        if selected_day != ALL_DAYS and item["day"] != selected_day:
+            continue
+        if requested_okrug and item["okrug"] != requested_okrug:
+            continue
+        if requested_tik and item["tik"] != requested_tik:
+            continue
+        if requested_precinct and item["precinct_id"] != requested_precinct:
+            continue
+        saved = statuses.get(item["id"], {})
+        item.update(status=saved.get("status", "open"), note=saved.get("note", ""),
+                    updated_at=saved.get("updated_at", ""))
+        anomaly_items.append(item)
+    anomaly_items.sort(key=lambda a: a["interviewer"])
+    anomaly_items.sort(key=lambda a: a["day"], reverse=True)
+    anomaly_items.sort(key=lambda a: (a["status"] != "open", severity_rank[a["severity"]]))
+    anomalies = {"items": anomaly_items[:300],
+                 "open": sum(a["status"] == "open" for a in anomaly_items),
+                 "closed": sum(a["status"] != "open" for a in anomaly_items)}
+
     party_order = [label for party_id, label in PARTIES if party_id != "2"]
     parties = [{"label": label, "count": answers[label],
                 "percent": round(answers[label] * 100 / total, 1) if total else 0} for label in party_order]
@@ -432,7 +675,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
         "ages": [{"label": label, "count": ages[label],
                   "percent": round(ages[label] * 100 / total, 1) if total else 0} for label in AGES],
         "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
-        "new_people_by_okrug": new_people_by_okrug,
+        "new_people_by_okrug": new_people_by_okrug, "party_okrug": party_okrug, "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,
     }
@@ -466,6 +709,8 @@ def create_app(settings=None):
     failures = {}
     dashboard_cache = {"at": 0.0, "values": []}
     dashboard_lock = threading.Lock()
+    anomaly_cache = {"at": 0.0, "values": {}, "ok": True}
+    anomaly_lock = threading.Lock()
 
     def signed(value):
         return hmac.new(settings.secret.encode(), value.encode(), hashlib.sha256).hexdigest()
@@ -502,6 +747,17 @@ def create_app(settings=None):
             values = read_sheet(settings)
             dashboard_cache.update(at=time.monotonic(), values=values)
             return values
+
+    def cached_anomaly_statuses():
+        with anomaly_lock:
+            if time.monotonic() - anomaly_cache["at"] >= 25:
+                try:
+                    anomaly_cache.update(values=read_anomaly_statuses(settings), ok=True)
+                except Exception as exc:
+                    LOG.warning("Anomaly statuses read failed (%s)", type(exc).__name__)
+                    anomaly_cache.update(ok=False)
+                anomaly_cache["at"] = time.monotonic()
+            return dict(anomaly_cache["values"]), anomaly_cache["ok"]
 
     @app.middleware("http")
     async def security(request, call_next):
@@ -595,10 +851,41 @@ def create_app(settings=None):
         if precinct and precinct not in {p["id"] for p in settings.precincts}:
             raise HTTPException(422, "Неизвестный УИК")
         try:
-            return dashboard_snapshot(cached_sheet_values(), settings, day, okrug, tik, precinct)
+            values = cached_sheet_values()
         except Exception as exc:
             LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
             raise HTTPException(502, "Не удалось прочитать Google Таблицу")
+        statuses, statuses_ok = cached_anomaly_statuses()
+        snapshot = dashboard_snapshot(values, settings, day, okrug, tik, precinct, statuses)
+        snapshot["anomalies"]["statuses_ok"] = statuses_ok
+        return snapshot
+
+    @app.post("/api/dashboard/anomalies/status", dependencies=[Depends(dashboard_authorized)])
+    def anomaly_status(body: AnomalyStatus):
+        if not settings.spreadsheet:
+            raise HTTPException(503, "Google Таблица не подключена")
+        try:
+            known = {item["id"]: item for item in detect_anomalies(parse_sheet_rows(cached_sheet_values()), settings)}
+        except Exception as exc:
+            LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "Не удалось прочитать Google Таблицу")
+        item = known.get(body.id)
+        if item is None:
+            raise HTTPException(404, "Аномалия не найдена: данные могли измениться")
+        note = "".join(c for c in body.note if ord(c) >= 32).strip()
+        record = {"id": body.id, "status": body.status, "note": note,
+                  "updated_at": datetime.now(settings.zone).isoformat(timespec="seconds"),
+                  "interviewer": item["interviewer"], "rule": item["rule"], "day": item["day"],
+                  "tik": item["tik"], "precinct": item["precinct"]}
+        with anomaly_lock:
+            try:
+                write_anomaly_status(settings, record)
+            except Exception as exc:
+                LOG.warning("Anomaly status write failed (%s)", type(exc).__name__)
+                raise HTTPException(502, "Не удалось сохранить статус в Google Таблице")
+            anomaly_cache["values"][body.id] = {"status": body.status, "note": note,
+                                                "updated_at": record["updated_at"]}
+        return {"ok": True}
 
     @app.post("/api/surveys", dependencies=[Depends(authorized)])
     def submit(body: Survey):

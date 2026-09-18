@@ -4,6 +4,13 @@ const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'
 let timer = null;
 let allInterviewers = [];
 let interviewersTotal = 0;
+let anomalyPayload = null;
+let showClosedAnomalies = false;
+let anomalyRenderPending = false;
+const interviewerSort = {key:'', dir:'desc'};
+const anomalyNotes = {};
+const METRIC_RGB = {success:'70,99,77', refusal:'217,120,98', share:'95,134,163'};
+const ANOMALY_STATUS = {open:'Открыта', clarified:'Уточнена', resolved:'Устранена'};
 const filters = {day:'', okrug:'', tik:'', precinct:''};
 
 async function request(url, options = {}) {
@@ -81,21 +88,78 @@ function renderGeo(data) {
   table.querySelectorAll('tr[data-okrug]').forEach(row => row.addEventListener('click', () => { filters.okrug = row.dataset.okrug; filters.tik = ''; filters.precinct = ''; load(); }));
   table.querySelectorAll('tr[data-tik]').forEach(row => row.addEventListener('click', () => { filters.tik = row.dataset.tik; filters.precinct = ''; load(); }));
 }
+function readRange(id) { const value = $('#' + id)?.value; return value === undefined || value === '' ? null : Number(value); }
 function applyInterviewerFilter() {
   const query = ($('#interviewer-search')?.value || '').trim().toLowerCase();
-  const items = query ? allInterviewers.filter(item => item.name.toLowerCase().includes(query)) : allInterviewers;
+  const rows = allInterviewers.map(item => ({
+    ...item, success: item.total - item.refusals,
+    refusal: item.total ? Math.round(item.refusals * 1000 / item.total) / 10 : 0,
+    share: interviewersTotal ? Math.round(item.total * 1000 / interviewersTotal) / 10 : 0,
+  }));
+  const max = {success: Math.max(1, ...rows.map(r => r.success)), refusal: 100, share: Math.max(1, ...rows.map(r => r.share))};
+  const ranges = ['success', 'refusal', 'share'].map(key => [key, readRange(`f-${key}-min`), readRange(`f-${key}-max`)]);
+  let items = rows.filter(r => (!query || r.name.toLowerCase().includes(query))
+    && ranges.every(([key, min, maxValue]) => (min === null || r[key] >= min) && (maxValue === null || r[key] <= maxValue)));
+  if (interviewerSort.key) {
+    const factor = interviewerSort.dir === 'asc' ? 1 : -1;
+    items = [...items].sort((a, b) => (a[interviewerSort.key] - b[interviewerSort.key]) * factor || a.name.localeCompare(b.name, 'ru'));
+  }
+  document.querySelectorAll('.sort-button').forEach(button => {
+    const active = button.dataset.sort === interviewerSort.key;
+    button.classList.toggle('active', active);
+    button.querySelector('span').textContent = active ? (interviewerSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+  });
   const empty = allInterviewers.length ? 'Совпадений не найдено' : 'Нет данных об интервьюерах';
-  $('#interviewers').innerHTML = items.length ? items.map(item => {
-    const success = item.total - item.refusals;
-    const refusalPercent = item.total ? Math.round(item.refusals * 1000 / item.total) / 10 : 0;
-    const sharePercent = interviewersTotal ? Math.round(item.total * 1000 / interviewersTotal) / 10 : 0;
-    return `<tr><td class="territory">${escapeHTML(item.name)}</td><td title="${escapeHTML(item.tik)}">${escapeHTML(item.precinct)}</td><td>${number(item.total)}</td><td>${number(item.refusals)}</td><td>${number(success)}</td><td>${refusalPercent}%</td><td>${sharePercent}%</td></tr>`;
-  }).join('') : `<tr><td colspan="7" class="empty">${empty}</td></tr>`;
+  const body = $('#interviewers');
+  body.innerHTML = items.length ? items.map(item => `<tr><td class="territory">${escapeHTML(item.name)}</td><td title="${escapeHTML(item.tik)}">${escapeHTML(item.precinct)}</td><td>${number(item.total)}</td><td>${number(item.refusals)}</td><td class="metric-cell" data-metric="success" data-level="${item.success / max.success}">${number(item.success)}</td><td class="metric-cell" data-metric="refusal" data-level="${item.refusal / max.refusal}">${item.refusal}%</td><td class="metric-cell" data-metric="share" data-level="${item.share / max.share}">${item.share}%</td></tr>`).join('') : `<tr><td colspan="7" class="empty">${empty}</td></tr>`;
+  body.querySelectorAll('td.metric-cell').forEach(cell => {
+    cell.style.background = `rgba(${METRIC_RGB[cell.dataset.metric]}, ${0.1 + 0.5 * Number(cell.dataset.level)})`;
+  });
 }
 function renderInterviewers(items, total) {
   allInterviewers = items;
   interviewersTotal = total;
   applyInterviewerFilter();
+}
+function renderHeatmap(heat) {
+  $('#heatmap-head').innerHTML = `<tr><th class="sticky-col">Ответ</th>${heat.okrugs.map(o => `<th>Округ ${escapeHTML(o.okrug)}<small>n = ${number(o.total)}</small></th>`).join('')}<th>Всего</th></tr>`;
+  const body = $('#heatmap-body');
+  body.innerHTML = heat.rows.map(row => {
+    const service = row.label === 'Испортил бюллетень' || row.label === 'Отказался отвечать';
+    const top = Math.max(0, ...row.cells.map(c => c.percent));
+    return `<tr class="${service ? 'service-row' : ''}"><th>${escapeHTML(row.label)}</th>${row.cells.map(c => `<td class="heat" data-level="${top ? c.percent / top : 0}" title="${number(c.count)} анкет">${c.percent}%</td>`).join('')}<td>${number(row.total)}</td></tr>`;
+  }).join('');
+  body.querySelectorAll('tr').forEach(tr => {
+    const rgb = tr.classList.contains('service-row') ? '217,120,98' : '70,99,77';
+    tr.querySelectorAll('td.heat').forEach(cell => {
+      const level = Number(cell.dataset.level);
+      cell.style.background = level ? `rgba(${rgb}, ${0.08 + 0.72 * level})` : '';
+      cell.classList.toggle('heat-dark', level > 0.6);
+    });
+  });
+}
+function anomalyEditing() { return Boolean(document.activeElement?.matches?.('#anomalies input')); }
+function anomalyCard(item) {
+  const id = escapeHTML(item.id);
+  const closed = item.status !== 'open';
+  const when = /^\d{4}-\d{2}-\d{2}$/.test(item.day) ? dateLabel(item.day) : item.day;
+  const controls = closed
+    ? `<div class="anomaly-controls"><span class="answer">${ANOMALY_STATUS[item.status]}</span>${item.note ? `<small class="anomaly-note">${escapeHTML(item.note)}</small>` : ''}<button class="ghost-button" type="button" data-anomaly="${id}" data-status="open">Вернуть в работу</button></div>`
+    : `<div class="anomaly-controls"><input type="text" maxlength="500" placeholder="Комментарий (необязательно)" aria-label="Комментарий" data-note-for="${id}" value="${escapeHTML(anomalyNotes[item.id] || '')}"><button class="ghost-button" type="button" data-anomaly="${id}" data-status="clarified">Уточнена</button><button class="ghost-button" type="button" data-anomaly="${id}" data-status="resolved">Устранена</button></div>`;
+  return `<article class="anomaly ${item.severity}${closed ? ' closed' : ''}"><span class="severity">${item.severity === 'high' ? 'Высокая' : 'Средняя'}</span><div class="anomaly-main"><strong>${escapeHTML(item.title)}</strong><p>${escapeHTML(item.detail)}</p><small>${escapeHTML(item.interviewer)} · ${escapeHTML(item.precinct)} · ${escapeHTML(item.tik)} · ${escapeHTML(when)}</small></div>${controls}</article>`;
+}
+function renderAnomalies(payload) {
+  if (payload) anomalyPayload = payload;
+  if (!anomalyPayload) return;
+  // A refresh must not wipe a comment the coordinator is typing.
+  if (anomalyEditing()) { anomalyRenderPending = true; return; }
+  anomalyRenderPending = false;
+  const {items, open, closed, statuses_ok} = anomalyPayload;
+  $('#anomaly-summary').textContent = `Открыто: ${open} · закрыто: ${closed}`;
+  $('#anomaly-notice').hidden = statuses_ok !== false;
+  const visible = items.filter(item => showClosedAnomalies || item.status === 'open');
+  $('#anomalies').innerHTML = visible.length ? visible.map(anomalyCard).join('')
+    : `<p class="empty">${items.length ? 'Открытых аномалий нет. Включите «Показывать закрытые», чтобы увидеть остальные.' : 'Аномалий не обнаружено.'}</p>`;
 }
 function renderRecent(items) {
   $('#recent').innerHTML = items.length ? items.map(item => `<div class="recent-row"><div class="recent-time">${escapeHTML(item.time)}</div><div class="recent-place"><strong>${escapeHTML(item.precinct)}</strong><span>${escapeHTML(item.tik)}</span></div><span class="answer ${item.answer === 'Отказался отвечать' ? 'refused' : ''}">${escapeHTML(item.answer)}</span></div>`).join('') : '<p class="empty">Пока нет анкет</p>';
@@ -117,8 +181,8 @@ function renderFilters(data) {
 function render(data) {
   renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties);
   renderColumns('#gender-chart',data.genders,{compact:true}); renderColumns('#age-chart',data.ages,{compact:true}); renderHours(data.hours);
-  renderColumns('#newpeople-chart',data.new_people_by_okrug);
-  renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderRecent(data.recent);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug); renderHeatmap(data.party_okrug);
+  renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;
   $('#updated-at').textContent = 'Обновлено в ' + new Date(data.generated_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
@@ -145,6 +209,35 @@ $('#day').addEventListener('change',event => { filters.day=event.target.value; f
 $('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });
 $('#tik').addEventListener('change',event => { filters.tik=event.target.value; filters.precinct=''; load(); });
 $('#precinct').addEventListener('change',event => { filters.precinct=event.target.value; load(); });
-document.addEventListener('input', event => { if (event.target.id === 'interviewer-search') applyInterviewerFilter(); });
+document.addEventListener('input', event => {
+  if (event.target.id === 'interviewer-search' || event.target.closest?.('.range-filters')) applyInterviewerFilter();
+  if (event.target.dataset?.noteFor) anomalyNotes[event.target.dataset.noteFor] = event.target.value;
+});
+document.querySelectorAll('.sort-button').forEach(button => button.addEventListener('click', () => {
+  if (interviewerSort.key !== button.dataset.sort) { interviewerSort.key = button.dataset.sort; interviewerSort.dir = 'desc'; }
+  else if (interviewerSort.dir === 'desc') interviewerSort.dir = 'asc';
+  else interviewerSort.key = '';
+  applyInterviewerFilter();
+}));
+$('#f-reset').addEventListener('click', () => {
+  document.querySelectorAll('.range-filters input').forEach(input => { input.value = ''; });
+  applyInterviewerFilter();
+});
+$('#anomaly-show-closed').addEventListener('change', event => { showClosedAnomalies = event.target.checked; renderAnomalies(); });
+$('#anomalies').addEventListener('focusout', () => setTimeout(() => { if (anomalyRenderPending && !anomalyEditing()) renderAnomalies(); }, 0));
+$('#anomalies').addEventListener('click', async event => {
+  const button = event.target.closest('button[data-anomaly]');
+  if (!button) return;
+  const id = button.dataset.anomaly;
+  button.disabled = true;
+  try {
+    await request('/api/dashboard/anomalies/status', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id, status: button.dataset.status, note: anomalyNotes[id] || ''})});
+    delete anomalyNotes[id];
+    await load();
+  } catch (error) {
+    $('#data-error').textContent = error.message; $('#data-error').hidden = false; button.disabled = false;
+  }
+});
 document.addEventListener('visibilitychange',() => { if (!document.hidden && !$('#dashboard').hidden) load(); });
 (async function init(){ try { await request('/api/dashboard/session'); await load(); } catch(error) { showLogin(error.status === 503 ? error.message : ''); } })();
