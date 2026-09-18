@@ -698,59 +698,96 @@ def test_snapshot_has_forecast_and_age_heatmap(settings):
     assert other_day["forecast"]["rows"] == snap["forecast"]["rows"]
 
 
-def detail(settings, rows, kind, key, **scope):
-    return dashboard_detail(rows, settings, kind, key, scope.pop("day", "2026-09-16"), **scope)
+FOCUS = "Новые люди"
 
 
-def breakdown(payload, title):
-    return next(b for b in payload["breakdowns"] if b["title"] == title)
+def detail(settings, rows, kind, key, focus=FOCUS, day="2026-09-16"):
+    return dashboard_detail(rows, settings, kind, key, focus=focus, requested_day=day)
 
 
-def test_refusal_detail_shows_who_refuses(settings):
-    rows = (shift_rows(settings, 60, answer=lambda i: "Отказался отвечать" if i % 2 == 0 else "КПРФ",
-                       age=lambda i: "61+" if i % 2 == 0 else "25–34")
-            + shift_rows(settings, 40, shift="s2", name="Пётр", answer="КПРФ", age="25–34"))
+def mk_rows(settings, spec):
+    """spec: (tik, count, answer, gender, age, shift)"""
+    rows = []
+    for tik, count, answer, gender, age, shift in spec:
+        precinct = next(p for p in settings.precincts if p["tik"] == tik)
+        for _ in range(count):
+            n = len(rows)
+            rows.append([f"m{n}", f"2026-09-16T{6 + n % 10:02d}:{n % 60:02d}:00+00:00", "2026-09-16", "А", shift, precinct["id"],
+                         precinct["label"], answer, gender, age, shift, "", tik])
+    return rows
+
+
+def texts(payload, section):
+    return " ".join(f["text"] for sec in payload["sections"] if sec["title"] == section for f in sec["findings"])
+
+
+BAL, DMI, KHI = "ТИК города Балашиха", "ТИК города Дмитров", "ТИК города Химки"
+
+
+def test_focus_profile_finds_core_weak_spots_and_significance(settings):
+    rows = mk_rows(settings, [(BAL, 80, FOCUS, "Мужской", "25–34", "a"), (BAL, 120, "КПРФ", "Мужской", "25–34", "b"),
+                              (BAL, 10, FOCUS, "Мужской", "61+", "c"), (BAL, 190, "КПРФ", "Мужской", "61+", "d")])
+    payload = detail(settings, rows, "party", FOCUS)
+    assert payload["role"] == "Ваша партия" and payload["focus"] == FOCUS
+    seen = texts(payload, "Что видно")
+    assert "Ядро — 25–34" in seen and "Слабое место — 61+" in seen
+    assert payload["headline"]["text"].startswith("«Новые люди»: 22.5%")
+    ages = next(t for sec in payload["sections"] if sec["title"] == "Сегменты поддержки" for t in sec["tables"] if "возрасту" in t["title"])
+    young = next(r for r in ages["rows"] if r[0]["t"] == "25–34")
+    assert young[3]["t"] == "178" and young[6]["t"] == "значимо выше"
+
+
+def test_group_analysis_separates_composition_from_real_effect(settings):
+    explained = mk_rows(settings, [
+        (BAL, 120, FOCUS, "Мужской", "25–34", "a"), (BAL, 180, "КПРФ", "Мужской", "25–34", "b"),
+        (BAL, 5, FOCUS, "Мужской", "61+", "c"), (BAL, 95, "КПРФ", "Мужской", "61+", "d"),
+        (DMI, 40, FOCUS, "Мужской", "25–34", "e"), (DMI, 60, "КПРФ", "Мужской", "25–34", "f"),
+        (DMI, 15, FOCUS, "Мужской", "61+", "g"), (DMI, 285, "КПРФ", "Мужской", "61+", "h")])
+    assert "объясняется составом" in texts(detail(settings, explained, "okrug", "118"), "Позиция «Новые люди»")
+    real = mk_rows(settings, [
+        (BAL, 250, FOCUS, "Мужской", "25–34", "a"), (BAL, 50, "КПРФ", "Мужской", "25–34", "b"),
+        (BAL, 5, FOCUS, "Мужской", "61+", "c"), (BAL, 95, "КПРФ", "Мужской", "61+", "d"),
+        (DMI, 20, FOCUS, "Мужской", "25–34", "e"), (DMI, 80, "КПРФ", "Мужской", "25–34", "f"),
+        (DMI, 15, FOCUS, "Мужской", "61+", "g"), (DMI, 285, "КПРФ", "Мужской", "61+", "h")])
+    assert "свойство самой группы" in texts(detail(settings, real, "okrug", "118"), "Позиция «Новые люди»")
+
+
+def test_rival_view_shows_where_we_lose_and_win(settings):
+    rows = mk_rows(settings, [(BAL, 100, "КПРФ", "Мужской", "61+", "a"), (BAL, 20, FOCUS, "Мужской", "61+", "b"),
+                              (BAL, 100, FOCUS, "Мужской", "25–34", "c"), (BAL, 20, "КПРФ", "Мужской", "25–34", "d")])
+    payload = detail(settings, rows, "party", "КПРФ")
+    seen = texts(payload, "Что видно")
+    assert payload["role"] == "Конкурент"
+    assert "Уступаем значимо: 61+" in seen and "Опережаем значимо: 25–34" in seen
+    assert any(sec["title"] == "Кто голосует за «КПРФ»" for sec in payload["sections"])
+
+
+def test_refusal_view_profiles_refusers_and_links_reserve_to_focus(settings):
+    rows = mk_rows(settings, [
+        (BAL, 60, "Отказался отвечать", "Мужской", "61+", "a"), (BAL, 40, FOCUS, "Мужской", "61+", "a"),
+        (BAL, 10, "Отказался отвечать", "Мужской", "25–34", "b"), (BAL, 90, FOCUS, "Мужской", "25–34", "b"),
+        (BAL, 20, "Отказался отвечать", "Мужской", "35–44", "c"), (BAL, 80, "КПРФ", "Мужской", "35–44", "c")])
     payload = detail(settings, rows, "party", "Отказался отвечать")
-    assert payload["kind"] == "party" and payload["metrics"][0]["value"] == "30"
-    ages = {r["label"]: r for r in breakdown(payload, "По возрасту")["rows"]}
-    assert ages["61+"]["percent"] == 100 and ages["25–34"]["percent"] == 0
-    assert any("61+" in f["text"] and "чаще всего" in f["text"] for f in payload["findings"])
-    people = breakdown(payload, "Интервьюеры с наибольшей долей отказов")["rows"]
-    assert people[0]["label"] == "Тестов Иван" and people[0]["percent"] == 50
+    titles = [sec["title"] for sec in payload["sections"]]
+    assert payload["role"].startswith("Отказы") and "Интервьюеры" in titles and any("Что скрывают отказы" in t for t in titles)
+    assert "61+" in texts(payload, "Что видно") and "значимо чаще" in texts(payload, "Что видно")
+    spoiled = detail(settings, rows, "party", "Испортил бюллетень")
+    assert spoiled["headline"]["text"].endswith("нет.")
 
 
-def test_party_detail_rank_forecast_and_small_sample(settings):
-    rows = shift_rows(settings, 120)
-    payload = detail(settings, rows, "party", "Единая Россия")
-    text = " ".join(f["text"] for f in payload["findings"])
-    assert "-е место из" in text and "Прогноз по всем данным" in text
-    small = detail(settings, shift_rows(settings, 6), "party", "Единая Россия")
-    assert any("мало" in f["text"] for f in small["findings"])
-    assert detail(settings, shift_rows(settings, 6), "party", "Родина")["findings"][0]["text"].startswith("Таких анкет")
+def test_shift_concentration_is_flagged(settings):
+    spec = [(BAL, 40, FOCUS, "Мужской", "25–34", f"s{i}") for i in range(3)]
+    spec += [(BAL, 40, "КПРФ", "Мужской", "25–34", f"t{i}") for i in range(5)]
+    assert "Три смены" in texts(detail(settings, mk_rows(settings, spec), "party", FOCUS), "Что видно")
 
 
-def test_group_detail_compares_with_whole_area(settings):
-    rows = (shift_rows(settings, 80, answer="КПРФ", age="61+")
-            + shift_rows(settings, 80, shift="s2", answer="Единая Россия", age="25–34"))
-    payload = detail(settings, rows, "age", "61+")
-    assert payload["title"] == "Возраст 61+" and payload["metrics"][0]["value"] == "80"
-    parties = {r["label"]: r for r in breakdown(payload, "Партии среди назвавших партию")["rows"]}
-    assert parties["КПРФ"]["percent"] == 100 and parties["КПРФ"]["baseline"] == 50
-    assert any("«КПРФ» здесь 100%" in f["text"] for f in payload["findings"])
-    assert not any(b["title"] == "Возрастной состав" for b in payload["breakdowns"])
-    assert any(b["title"] == "Состав по полу" for b in payload["breakdowns"])
-
-
-def test_okrug_hour_and_gender_details(settings):
-    rows = shift_rows(settings, 60)
-    okrug = TIK_TO_OKRUG[settings.precincts[0]["tik"]]
-    assert detail(settings, rows, "okrug", okrug)["metrics"][0]["value"] == "60"
-    assert detail(settings, rows, "okrug", "999" if "999" not in OKRUGS else "118")["title"].startswith("Округ")
-    hour = detail(settings, rows, "hour", "10")
-    assert hour["title"] == "Час 10:00–10:59" and int(hour["metrics"][0]["value"].replace("\u00a0", "")) > 0
-    assert detail(settings, rows, "gender", "Женский")["title"] == "Женщины"
-    empty = detail(settings, [], "gender", "Мужской")
-    assert empty["findings"][0]["text"].startswith("Анкет в этой группе")
+def test_focus_can_be_switched_and_edge_cases_do_not_crash(settings):
+    rows = mk_rows(settings, [(BAL, 60, "КПРФ", "Мужской", "25–34", "a"), (BAL, 40, FOCUS, "Женский", "45–60", "b")])
+    assert detail(settings, rows, "party", "КПРФ", focus="КПРФ")["role"] == "Ваша партия"
+    for kind, key in (("party", "Родина"), ("gender", "Женский"), ("age", "45–60"), ("okrug", "118"), ("hour", "10"), ("party", "Испортил бюллетень")):
+        for data in (rows, [], mk_rows(settings, [(BAL, 3, "КПРФ", "Мужской", "25–34", "a")])):
+            payload = detail(settings, data, kind, key)
+            assert payload["title"] and payload["headline"]["text"] and isinstance(payload["sections"], list)
 
 
 def test_detail_endpoint_validation_and_scope(settings, monkeypatch):
@@ -767,5 +804,8 @@ def test_detail_endpoint_validation_and_scope(settings, monkeypatch):
         assert client.get("/api/dashboard/detail", params={**query, "key": "Яблоко"}).status_code == 422
         assert client.get("/api/dashboard/detail", params={**query, "kind": "age", "key": "17"}).status_code == 422
         assert client.get("/api/dashboard/detail", params={**query, "okrug": "999"}).status_code == 422
+        assert client.get("/api/dashboard/detail", params={**query, "focus": "Отказался отвечать"}).status_code == 422
+        assert client.get("/api/dashboard/detail", params={**query, "focus": "Яблоко"}).status_code == 422
+        assert client.get("/api/dashboard/detail", params={**query, "focus": "КПРФ"}).json()["focus"] == "КПРФ"
         body = client.get("/api/dashboard/detail", params={**query, "day": "2026-09-15"}).json()
         assert body["metrics"][0]["value"] == "0"

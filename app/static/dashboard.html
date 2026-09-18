@@ -99,6 +99,12 @@
 
       <section class="panel"><header><div><p class="kicker">ПОТОК</p><h2>Последние анкеты</h2></div></header><div id="recent" class="recent"></div></section>
     </main>
+
+    <aside id="detail-drawer" class="drawer" hidden aria-label="Анализ графы">
+      <header class="drawer-head"><div><p class="kicker" id="drawer-role">АНАЛИЗ ГРАФЫ</p><h2 id="drawer-title"></h2><p id="drawer-sub" class="subtle"></p></div><button id="detail-close" class="ghost-button" type="button">Закрыть</button></header>
+      <label class="focus-select">Позиция<select id="focus-party" aria-label="Партия, с позиции которой строится анализ"></select></label>
+      <div id="drawer-body"></div>
+    </aside>
   </div>
 </body>
 </html>

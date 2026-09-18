@@ -721,22 +721,28 @@ DETAIL_MIN_N = 30
 TIME_BLOCKS = (("до 12:00", 0, 12), ("12:00–16:00", 12, 16), ("с 16:00", 16, 24))
 GENDER_LABELS = ("Мужской", "Женский")
 DETAIL_KINDS = ("party", "gender", "age", "okrug", "hour")
+DEFAULT_FOCUS = "Новые люди"
+Z95 = 1.96
 
 
 def _fmt_int(value):
-    return f"{int(value):,}".replace(",", "\u00a0")
+    return f"{int(value):,}".replace(",", " ")
 
 
 def _pct(value):
     return f"{round(value, 1):g}%"
 
 
-def _people(count):
-    return "человека" if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14) else "человек"
+def _pp(value):
+    return f"{value:+.1f} п.п."
 
 
 def _share(count, total):
     return round(count * 100 / total, 1) if total else 0
+
+
+def _people(count):
+    return "человека" if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14) else "человек"
 
 
 def scope_rows(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct):
@@ -762,183 +768,595 @@ def _time_block(row, settings):
     return next(name for name, low, high in TIME_BLOCKS if low <= hour < high)
 
 
-def _breakdown(title, note, groups, baseline=None):
-    """groups: (label, count, total[, baseline]); percent is count / total."""
-    rows = []
-    for group in groups:
-        label, count, total = group[:3]
-        rows.append({"label": label, "count": count, "total": total, "percent": _share(count, total),
-                     "small": total < DETAIL_MIN_N, "baseline": group[3] if len(group) > 3 else baseline})
-    return {"title": title, "note": note, "rows": rows}
+def _wilson(hit, n):
+    """95% interval for a share, with the effective sample size reduced by the cluster design effect."""
+    n_eff = n / FORECAST_DEFF
+    if n_eff <= 0:
+        return 0.0, 0.0
+    p = hit / n
+    denominator = 1 + Z95 ** 2 / n_eff
+    centre = (p + Z95 ** 2 / (2 * n_eff)) / denominator
+    half = Z95 * math.sqrt(p * (1 - p) / n_eff + Z95 ** 2 / (4 * n_eff ** 2)) / denominator
+    return centre - half, centre + half
 
 
-def _detail_payload(kind, key, title, scope, metrics, breakdowns, findings):
-    return {"kind": kind, "key": key, "title": title, "subtitle": f"В выбранной области: {_fmt_int(len(scope))} анкет",
-            "metrics": metrics, "breakdowns": breakdowns, "findings": findings}
+def _z_prop(hit_a, n_a, hit_b, n_b):
+    """Difference between two independent groups' shares, in standard errors."""
+    if not n_a or not n_b:
+        return 0.0
+    pooled = (hit_a + hit_b) / (n_a + n_b)
+    error = math.sqrt(FORECAST_DEFF * pooled * (1 - pooled) * (1 / n_a + 1 / n_b))
+    return (hit_a / n_a - hit_b / n_b) / error if error else 0.0
 
 
-def party_detail(scope, label, settings, forecast):
-    """Who gives this answer: rates by age, gender, okrug and time of day, plus what the forecast says."""
-    findings = []
+def _z_same_sample(hit_a, hit_b, n):
+    """Difference between two options' shares inside one sample (multinomial), in standard errors."""
+    if not n:
+        return 0.0
+    pa, pb = hit_a / n, hit_b / n
+    variance = FORECAST_DEFF * (pa + pb - (pa - pb) ** 2) / n
+    return (pa - pb) / math.sqrt(variance) if variance > 0 else 0.0
 
-    def note(level, text):
-        findings.append({"level": level, "text": text})
 
-    service = label in SERVICE_ANSWERS
-    subset = [r for r in scope if r["answer"] == label]
+def _standardize(subset, everyone, label, control):
+    """Observed vs expected rate for a group if it behaved like everyone else with the same control mix."""
+    cells = defaultdict(lambda: [0, 0])
+    for r in everyone:
+        cell = cells[control(r)]
+        cell[1] += 1
+        cell[0] += r["answer"] == label
+    overall = sum(c[0] for c in cells.values()) / len(everyone) if everyone else 0
+    expected = variance = 0.0
+    for r in subset:
+        hit, n = cells[control(r)]
+        p = hit / n if n >= 10 else overall
+        expected += p
+        variance += p * (1 - p)
+    observed = sum(r["answer"] == label for r in subset)
+    z = (observed - expected) / math.sqrt(FORECAST_DEFF * variance) if variance else 0.0
+    return observed * 100 / len(subset), expected * 100 / len(subset), z
+
+
+def _verdict(z, n):
+    if n < DETAIL_MIN_N:
+        return "мало данных", "muted"
+    if z >= Z95:
+        return "значимо выше", "up"
+    if z <= -Z95:
+        return "значимо ниже", "down"
+    return "в пределах погрешности", ""
+
+
+def _shift_key(row):
+    return row["shift_id"] or f'{row["surname"]}|{row["name"]}'
+
+
+def _shift_concentration(scope, label, service=False):
+    """Do a few shifts hold a disproportionate part of this answer? (interviewer or precinct effect)"""
     pool = scope if service else [r for r in scope if r["answer"] not in SERVICE_ANSWERS]
-    overall = _share(len(subset), len(pool))
-    metrics = [{"label": "Анкет", "value": _fmt_int(len(subset))},
-               {"label": "От всех анкет", "value": _pct(_share(len(subset), len(scope)))}]
-    if not service:
-        metrics.append({"label": "Среди назвавших партию", "value": _pct(overall)})
+    hits = Counter(_shift_key(r) for r in pool if r["answer"] == label)
+    everything = Counter(_shift_key(r) for r in pool)
+    total_hits, total_pool = sum(hits.values()), sum(everything.values())
+    if total_hits < DETAIL_MIN_N or len(everything) < 5:
+        return None
+    top = [key for key, _ in hits.most_common(3)]
+    hit_share = sum(hits[k] for k in top) * 100 / total_hits
+    pool_share = sum(everything[k] for k in top) * 100 / total_pool
+    return {"shifts": len(hits), "hit_share": hit_share, "pool_share": pool_share,
+            "flag": hit_share >= 1.8 * pool_share and hit_share >= 40}
+
+
+def _dim_labels(dim):
+    return sorted(OKRUGS) if dim == "okrug" else {"age": AGES, "gender": GENDER_LABELS,
+                                                   "time": [name for name, _, _ in TIME_BLOCKS]}[dim]
+
+
+def _dim_value(dim, row, settings):
+    if dim == "okrug":
+        return TIK_TO_OKRUG.get(row["tik"], "")
+    return _time_block(row, settings) if dim == "time" else row["gender" if dim == "gender" else "age"]
+
+
+def _dim_label(dim, raw):
+    return f"Округ {raw}" if dim == "okrug" else raw
+
+
+DIM_TITLES = {"age": "по возрасту", "gender": "по полу", "okrug": "по округам", "time": "по времени суток"}
+
+
+def _segment_stats(rows, settings, dim, label):
+    """Share of one answer in each segment of a dimension, with index, significance and contribution."""
+    service = label in SERVICE_ANSWERS
+    pool_all = rows if service else [r for r in rows if r["answer"] not in SERVICE_ANSWERS]
+    total_pool, total_hit = len(pool_all), sum(r["answer"] == label for r in pool_all)
+    base = total_hit / total_pool if total_pool else 0
+    groups = defaultdict(list)
+    for r in rows:
+        groups[_dim_value(dim, r, settings)].append(r)
+    stats = []
+    for raw in _dim_labels(dim):
+        segment = groups.get(raw)
+        if not segment:
+            continue
+        pool = segment if service else [r for r in segment if r["answer"] not in SERVICE_ANSWERS]
+        n, hit = len(pool), sum(r["answer"] == label for r in pool)
+        refusals = sum(r["answer"] == "Отказался отвечать" for r in segment)
+        low, high = _wilson(hit, n)
+        stats.append({
+            "dim": dim, "raw": raw, "label": _dim_label(dim, raw), "n": n, "all": len(segment), "hit": hit,
+            "rate": hit * 100 / n if n else 0, "index": (hit / n) / base * 100 if n and base else 0,
+            "z": _z_prop(hit, n, total_hit - hit, total_pool - n), "margin": (high - low) / 2 * 100,
+            "contribution": hit * 100 / total_hit if total_hit else 0, "refusals": refusals,
+            "refusal_rate": refusals * 100 / len(segment)})
+    return stats, base * 100
+
+
+def _cell(text, cls="", bar=None):
+    return {"t": text, "cls": cls, "bar": bar}
+
+
+def _table(title, columns, rows, note=""):
+    return {"title": title, "columns": columns, "rows": rows, "note": note}
+
+
+def _answer_table(dim, stats, label, service):
+    unit = "анкет" if service else "назвавших"
+    rows = []
+    for s in stats:
+        text, cls = _verdict(s["z"], s["n"])
+        rows.append([_cell(s["label"]), _cell(_fmt_int(s["n"])), _cell(f"{s['rate']:.1f}%", bar=s["rate"]),
+                     _cell(f"{s['index']:.0f}" if s["n"] >= DETAIL_MIN_N else "—", cls),
+                     _cell(text, cls)])
+    return _table(f"«{label}» {DIM_TITLES[dim]}", ["Сегмент", f"База ({unit})", "Доля", "Индекс", "Вывод"], rows,
+                  "Индекс: 100 — как в среднем по области; выше — группа поддерживает сильнее.")
+
+
+def _section(title, findings=None, tables=None, note=""):
+    return {"title": title, "findings": findings or [], "tables": tables or [], "note": note}
+
+
+def _find(level, text):
+    return {"level": level, "text": text}
+
+
+def _quality_findings(scope, focus_or_answer, service=False):
+    findings = []
+    people = {_shift_key(r) for r in scope}
+    precincts = {r["precinct_id"] for r in scope}
+    findings.append(_find("info", f"База анализа: {_fmt_int(len(scope))} анкет, {len(precincts)} УИК, {len(people)} смен интервьюеров."))
+    concentration = _shift_concentration(scope, focus_or_answer, service)
+    if concentration and concentration["flag"]:
+        findings.append(_find("warning", f"Три смены дают {concentration['hit_share']:.0f}% этих ответов при {concentration['pool_share']:.0f}% всех анкет: "
+                                         "возможен эффект интервьюера или участка, результат стоит перепроверить."))
+    return findings
+
+
+def _rank_table(named, focus):
+    counts = Counter(r["answer"] for r in named)
+    order = [name for name, _ in counts.most_common()]
+    total, mine = len(named), counts[focus]
+    rows = []
+    for name in order[:8]:
+        low, high = _wilson(counts[name], total)
+        gap = (counts[name] - mine) * 100 / total
+        z = _z_same_sample(counts[name], mine, total)
+        text = "это «" + focus + "»" if name == focus else (f"{_pp(gap)}, " + ("значимо" if abs(z) >= Z95 else "в пределах погрешности"))
+        rows.append([_cell(name, "focus" if name == focus else ""), _cell(f"{counts[name] * 100 / total:.1f}%", bar=counts[name] * 100 / total),
+                     _cell(f"± {(high - low) / 2 * 100:.1f}"), _cell(text, "" if name == focus or abs(z) < Z95 else ("down" if gap > 0 else "up"))])
+    return order, counts, _table("Расстановка сил среди назвавших партию", ["Партия", "Доля", "Погрешность, п.п.", "Отрыв от «" + focus + "»"], rows)
+
+
+def _neighbour_findings(order, counts, total, focus):
+    findings = []
+    if focus not in order:
+        return findings
+    place = order.index(focus)
+    for other, word in ((order[place - 1] if place else None, "выше"), (order[place + 1] if place + 1 < len(order) else None, "ниже")):
+        if not other:
+            continue
+        gap = (counts[other] - counts[focus]) * 100 / total
+        z = _z_same_sample(counts[other], counts[focus], total)
+        significant = abs(z) >= Z95
+        findings.append(_find("notable" if not significant else "info",
+                              f"Ближайшая партия {word}: {other}, разрыв {abs(gap):.1f} п.п. — "
+                              + ("статистически значимо, место надёжно." if significant else
+                                 "в пределах погрешности, за это место идёт борьба, порядок может поменяться.")))
+    return findings
+
+
+def _forecast_row(forecast, label):
+    return next((r for r in forecast["rows"] if r["label"] == label), None) if forecast else None
+
+
+def _classify(stat, refusal_all):
+    if stat["n"] < DETAIL_MIN_N:
+        return "small"
+    if stat["index"] >= 115 and stat["z"] >= Z95:
+        return "core"
+    if stat["index"] <= 85 and stat["z"] <= -Z95:
+        return "weak"
+    if stat["refusal_rate"] >= refusal_all + 5 and stat["index"] >= 90:
+        return "reserve"
+    return "mid"
+
+
+def _reserve(stats, dim):
+    rows = []
+    for s in sorted(stats, key=lambda s: -s["refusals"])[:6]:
+        expected = s["refusals"] * s["rate"] / 100 if s["n"] >= DETAIL_MIN_N else None
+        rows.append([_cell(s["label"]), _cell(_fmt_int(s["refusals"])), _cell(f"{s['refusal_rate']:.1f}%"),
+                     _cell(f"{s['rate']:.1f}%" if s["n"] >= DETAIL_MIN_N else "—"),
+                     _cell(f"≈ {_fmt_int(round(expected))}" if expected is not None else "—")])
+    return _table(f"Где сосредоточены отказавшиеся ({DIM_TITLES[dim]})",
+                  ["Сегмент", "Отказались", "Доля отказов", "Ставка партии", "Дали бы голосов"], rows,
+                  "«Дали бы голосов» — сколько получила бы партия, если бы отказавшиеся голосовали, как остальные в этом сегменте.")
+
+
+def focus_detail(scope, focus, settings, forecast):
+    """The focus party's own picture: core, growth reserve and weak spots with significance."""
+    named = [r for r in scope if r["answer"] not in SERVICE_ANSWERS]
+    votes = sum(r["answer"] == focus for r in named)
+    metrics = [{"label": "Назвали партию", "value": _fmt_int(len(named))}, {"label": "Голосов", "value": _fmt_int(votes)}]
+    if not votes:
+        return {"headline": {"level": "info", "text": f"«{focus}»: в выбранной области голосов нет."},
+                "metrics": metrics, "sections": []}
+    low, high = _wilson(votes, len(named))
+    share = votes * 100 / len(named)
+    order, counts, rank_table = _rank_table(named, focus)
+    place = order.index(focus) + 1
+    metrics = [{"label": "Доля среди назвавших", "value": f"{share:.1f}% ± {(high - low) / 2 * 100:.1f}"},
+               {"label": "Место", "value": f"{place} из {len(order)}"}, {"label": "Голосов", "value": _fmt_int(votes)}]
+    row = _forecast_row(forecast, focus)
+    if row:
+        metrics.append({"label": "Прогноз", "value": f"{row['forecast']}% ± {row['margin']:g}"})
+    refusal_all = sum(r["answer"] == "Отказался отвечать" for r in scope) * 100 / len(scope)
+
+    tables, everything = [], []
+    for dim in ("age", "gender", "okrug", "time"):
+        stats, _ = _segment_stats(scope, settings, dim, focus)
+        everything += [dict(s, klass=_classify(s, refusal_all)) for s in stats]
+        rows = []
+        for s in sorted(stats, key=lambda s: (s["n"] < DETAIL_MIN_N, -s["index"])):
+            text, cls = _verdict(s["z"], s["n"])
+            rows.append([_cell(s["label"]), _cell(_fmt_int(s["n"])),
+                         _cell(f"{s['rate']:.1f}% ± {s['margin']:.1f}" if s["n"] >= DETAIL_MIN_N else f"{s['rate']:.1f}%", bar=s["rate"]),
+                         _cell(f"{s['index']:.0f}" if s["n"] >= DETAIL_MIN_N else "—", cls),
+                         _cell(f"{s['contribution']:.0f}%"), _cell(f"{s['refusal_rate']:.0f}%"), _cell(text, cls)])
+        tables.append(_table(f"Поддержка «{focus}» {DIM_TITLES[dim]}",
+                             ["Сегмент", "Назвали", "Доля ± погр.", "Индекс", "Вклад", "Отказы", "Вывод"], rows,
+                             "Вклад — какая часть всех голосов партии приходится на сегмент."))
+
+    cross = defaultdict(lambda: [0, 0])
+    for r in named:
+        if r["age"] and r["gender"]:
+            cell = cross[(r["age"], r["gender"])]
+            cell[1] += 1
+            cell[0] += r["answer"] == focus
+    cross_rows = []
+    for age in AGES:
+        line = [_cell(age)]
+        for gender in GENDER_LABELS:
+            hit, n = cross[(age, gender)]
+            line.append(_cell(f"{hit * 100 / n:.1f}% ({n})" if n >= DETAIL_MIN_N else f"мало данных ({n})",
+                              "" if n < DETAIL_MIN_N else ("up" if hit * 100 / n >= share * 1.15 else "down" if hit * 100 / n <= share * 0.85 else ""),
+                              bar=hit * 100 / n if n >= DETAIL_MIN_N else None))
+        cross_rows.append(line)
+    tables.append(_table(f"Возраст × пол: «{focus}»", ["Возраст", "Мужчины", "Женщины"], cross_rows,
+                         "Зелёным — заметно выше средней доли партии, красным — заметно ниже."))
+
+    core = sorted((s for s in everything if s["klass"] == "core"), key=lambda s: -s["index"])
+    weak = sorted((s for s in everything if s["klass"] == "weak"), key=lambda s: s["index"])
+    reserve = sorted((s for s in everything if s["klass"] == "reserve" and s["dim"] != "time"), key=lambda s: -s["refusals"] * s["rate"])
+    findings = []
+    for s in core[:3]:
+        findings.append(_find("info", f"Ядро — {s['label']} ({DIM_TITLES[s['dim']]}): {s['rate']:.1f}% при среднем {share:.1f}%, индекс {s['index']:.0f}, "
+                                      f"даёт {s['contribution']:.0f}% всех голосов партии."))
+    for s in weak[:3]:
+        findings.append(_find("notable", f"Слабое место — {s['label']} ({DIM_TITLES[s['dim']]}): {s['rate']:.1f}%, индекс {s['index']:.0f}, значимо ниже остальных."))
+    for s in reserve[:2]:
+        expected = s["refusals"] * s["rate"] / 100
+        findings.append(_find("info", f"Резерв — {s['label']} ({DIM_TITLES[s['dim']]}): отказалось {_fmt_int(s['refusals'])} ({s['refusal_rate']:.0f}%), "
+                                      f"ставка партии здесь {s['rate']:.1f}%; при ней отказавшиеся дали бы ≈ {_fmt_int(round(expected))} голосов."))
+    if not (core or weak):
+        findings.append(_find("info", "Значимых различий между группами нет: поддержка ровная. Для выводов по сегментам нужно больше анкет."))
+    findings += _neighbour_findings(order, counts, len(named), focus)
+    findings += _quality_findings(scope, focus)
+    if row:
+        findings.append(_find("info", f"Прогноз по всем данным: {row['forecast']}% (± {row['margin']:g} п.п.), поправка к доле ответивших {row['delta']:+g} п.п."
+                                      + (f"; оценка ещё дрейфует ({row['trend']:+g} п.п. за последние 30% данных)." if row["trend"] is not None and abs(row["trend"]) > 1 else ".")))
+
+    reserve_tables = [_reserve(_segment_stats(scope, settings, dim, focus)[0], dim) for dim in ("age", "okrug")]
+    actions = []
+    if core:
+        actions.append(f"Удерживать ядро: {', '.join(s['label'] for s in core[:3])}. Проверить, на каких УИК и сменах держится результат.")
+    if reserve:
+        actions.append(f"Работать с резервом: {', '.join(s['label'] for s in reserve[:2])} — высокая доля отказов при средней или выше средней поддержке.")
+    if weak:
+        actions.append(f"Слабые места ({', '.join(s['label'] for s in weak[:3])}): гипотезы — сообщение не доходит до группы либо структурный барьер; "
+                       "проверить на дополнительной выборке, причину по опросу определить нельзя.")
+    if not actions:
+        actions.append("Пока нет значимых сегментов для действий: накопить данные и вернуться к анализу.")
+
+    headline_parts = [f"«{focus}»: {share:.1f}% среди назвавших, {place}-е место из {len(order)}."]
+    if core:
+        headline_parts.append(f"Сильнее всего — {core[0]['label']} (индекс {core[0]['index']:.0f}).")
+    if weak:
+        headline_parts.append(f"Слабее всего — {weak[0]['label']} (индекс {weak[0]['index']:.0f}).")
+    if reserve:
+        headline_parts.append(f"Главный резерв — {reserve[0]['label']}.")
+    return {"headline": {"level": "notable" if weak else "info", "text": " ".join(headline_parts)}, "metrics": metrics,
+            "sections": [_section("Что видно", findings), _section("Сегменты поддержки", tables=tables[:4]),
+                         _section("Возраст и пол вместе", tables=[tables[4]]),
+                         _section("Расстановка сил", tables=[rank_table]),
+                         _section("Скрытый резерв в отказах", tables=reserve_tables),
+                         _section("Что проверить и делать", [_find("info", a) for a in actions])]}
+
+
+def _versus_table(dim, named, settings, focus, rival):
+    groups = defaultdict(list)
+    for r in named:
+        groups[_dim_value(dim, r, settings)].append(r)
+    rows, ahead, behind = [], [], []
+    for raw in _dim_labels(dim):
+        segment = groups.get(raw)
+        if not segment:
+            continue
+        n = len(segment)
+        mine, theirs = sum(r["answer"] == focus for r in segment), sum(r["answer"] == rival for r in segment)
+        gap, z = (mine - theirs) * 100 / n, _z_same_sample(mine, theirs, n)
+        if n < DETAIL_MIN_N:
+            text, cls = "мало данных", "muted"
+        elif abs(z) < Z95:
+            text, cls = "в пределах погрешности", ""
+        else:
+            text, cls = ("опережаем", "up") if gap > 0 else ("уступаем", "down")
+            (ahead if gap > 0 else behind).append((_dim_label(dim, raw), gap))
+        rows.append([_cell(_dim_label(dim, raw)), _cell(f"{mine * 100 / n:.1f}%", bar=mine * 100 / n),
+                     _cell(f"{theirs * 100 / n:.1f}%", bar=theirs * 100 / n), _cell(_pp(gap), cls), _cell(text, cls)])
+    return _table(f"«{focus}» и «{rival}» {DIM_TITLES[dim]}", ["Сегмент", focus, rival, "Разница", "Вывод"], rows), ahead, behind
+
+
+def rival_detail(scope, label, focus, settings, forecast):
+    """A rival party seen from the focus party's position: head-to-head by segment and the rival's own base."""
+    named = [r for r in scope if r["answer"] not in SERVICE_ANSWERS]
+    counts = Counter(r["answer"] for r in named)
+    if not counts[label]:
+        return {"headline": {"level": "info", "text": f"«{label}»: в выбранной области голосов нет."},
+                "metrics": [{"label": "Голосов", "value": "0"}], "sections": []}
+    total = len(named)
+    order = [name for name, _ in counts.most_common()]
+    share_rival, share_focus = counts[label] * 100 / total, counts[focus] * 100 / total
+    z = _z_same_sample(counts[label], counts[focus], total)
+    gap = share_rival - share_focus
+    metrics = [{"label": f"«{label}»", "value": f"{share_rival:.1f}%"}, {"label": f"«{focus}»", "value": f"{share_focus:.1f}%"},
+               {"label": "Разница", "value": _pp(gap)}, {"label": "Место", "value": f"{order.index(label) + 1} из {len(order)}"}]
+    tables, ahead, behind = [], [], []
+    for dim in ("age", "gender", "okrug"):
+        table, won, lost = _versus_table(dim, named, settings, focus, label)
+        tables.append(table)
+        ahead += [(f"{name} ({DIM_TITLES[dim]})", g) for name, g in won]
+        behind += [(f"{name} ({DIM_TITLES[dim]})", g) for name, g in lost]
+    base_tables = []
+    for dim in ("age", "gender"):
+        stats, _ = _segment_stats(scope, settings, dim, label)
+        base_tables.append(_answer_table(dim, stats, label, False))
+    findings = [_find("notable" if abs(z) >= Z95 else "info",
+                      f"Общий разрыв: «{label}» {'впереди' if gap > 0 else 'позади'} «{focus}» на {abs(gap):.1f} п.п. — "
+                      + ("статистически значимо." if abs(z) >= Z95 else "в пределах погрешности, различие может быть случайным."))]
+    if behind:
+        findings.append(_find("notable", "Уступаем значимо: " + ", ".join(f"{n} ({g:+.1f})" for n, g in sorted(behind, key=lambda x: x[1])[:4]) + "."))
+    if ahead:
+        findings.append(_find("info", "Опережаем значимо: " + ", ".join(f"{n} ({g:+.1f})" for n, g in sorted(ahead, key=lambda x: -x[1])[:4]) + "."))
+    if not (ahead or behind):
+        findings.append(_find("info", "Ни в одном сегменте разница между партиями не выходит за пределы погрешности."))
+    findings += _quality_findings(scope, label)
+    actions = []
+    if behind:
+        actions.append(f"Конкурент «{label}» перехватывает аудиторию в: {', '.join(n for n, _ in sorted(behind, key=lambda x: x[1])[:3])}. Изучить, чем он там привлекает, и сравнить сообщения.")
+    if ahead:
+        actions.append(f"Защищать преимущество над «{label}»: {', '.join(n for n, _ in sorted(ahead, key=lambda x: -x[1])[:3])}.")
+    if not actions:
+        actions.append("Значимых сегментных различий нет: партии делят аудиторию похоже, выводов о конкуренции пока делать нельзя.")
+    return {"headline": {"level": "notable" if behind else "info",
+                         "text": f"«{label}» {'опережает' if gap > 0 else 'отстаёт от'} «{focus}» на {abs(gap):.1f} п.п. ({'значимо' if abs(z) >= Z95 else 'в пределах погрешности'})."
+                                 + (f" Значимо сильнее в: {', '.join(n for n, _ in sorted(behind, key=lambda x: x[1])[:2])}." if behind else "")},
+            "metrics": metrics,
+            "sections": [_section("Что видно", findings), _section("Прямое сравнение по сегментам", tables=tables),
+                         _section(f"Кто голосует за «{label}»", tables=base_tables),
+                         _section("Что проверить и делать", [_find("info", a) for a in actions])]}
+
+
+def answer_detail(scope, label, focus, settings, forecast):
+    """Refusals and spoiled ballots: who they are, whether a few shifts hold them, and what they hide for the focus party."""
+    refusal = label == "Отказался отвечать"
+    subset = [r for r in scope if r["answer"] == label]
+    total = len(scope)
+    metrics = [{"label": "Анкет", "value": _fmt_int(len(subset))}, {"label": "От всех анкет", "value": _pct(_share(len(subset), total))}]
     if not subset:
-        note("info", "Таких анкет в выбранной области нет.")
-        return _detail_payload("party", label, label, scope, metrics, [], findings)
-
-    def groups(keyfunc, labels):
-        chosen, everyone = Counter(keyfunc(r) for r in subset), Counter(keyfunc(r) for r in pool)
-        return [(name, chosen[name], everyone[name]) for name in labels]
-
-    okrug_ids = sorted(OKRUGS)
-    age_groups = groups(lambda r: r["age"], AGES)
-    gender_groups = groups(lambda r: r["gender"], GENDER_LABELS)
-    okrug_groups = [("Округ " + okrug, count, total)
-                    for okrug, (_, count, total) in zip(okrug_ids, groups(lambda r: TIK_TO_OKRUG.get(r["tik"], ""), okrug_ids))]
-    time_groups = groups(lambda r: _time_block(r, settings), [name for name, _, _ in TIME_BLOCKS])
-    unit = "всех анкет" if service else "назвавших партию"
-    caption = f"доля «{label}» среди {unit} в группе; чёрная черта — в целом по области ({_pct(overall)})"
-    breakdowns = [
-        _breakdown("По возрасту", caption, age_groups, overall),
-        _breakdown("По полу", caption, gender_groups, overall),
-        _breakdown("По округам", caption,
-                   sorted((g for g in okrug_groups if g[2]), key=lambda g: (g[2] < DETAIL_MIN_N, -_share(g[1], g[2]))), overall),
-        _breakdown("По времени суток", caption, time_groups, overall),
-    ]
-
-    if len(subset) < DETAIL_MIN_N:
-        note("info", f"Таких анкет мало ({len(subset)}): выводы ниже ненадёжны.")
-    if not service:
-        counts = Counter(r["answer"] for r in pool)
-        order = [name for name, _ in counts.most_common()]
-        note("info", f"{order.index(label) + 1}-е место из {len(order)} среди назвавших партию: {_pct(overall)} ({_fmt_int(len(subset))}).")
-
-    def spread(items, threshold, template):
-        eligible = [(name, _share(count, total)) for name, count, total in items if total >= DETAIL_MIN_N]
-        if len(eligible) >= 2:
-            high, low = max(eligible, key=lambda g: g[1]), min(eligible, key=lambda g: g[1])
-            if high[1] - low[1] >= threshold:
-                note("notable", template.format(hi=high[0], hp=_pct(high[1]), lo=low[0], lp=_pct(low[1])))
-
-    where = "чаще всего в группе {hi} ({hp}), реже всего — в группе {lo} ({lp})" if service else \
-            "сильнее всего в группе {hi} ({hp}), слабее всего — в группе {lo} ({lp})"
-    threshold = 5 if service else 8
-    spread(age_groups, threshold, f"«{label}»: {where}.")
-    men, women = gender_groups
-    if men[2] >= DETAIL_MIN_N and women[2] >= DETAIL_MIN_N and abs(_share(men[1], men[2]) - _share(women[1], women[2])) >= 5:
-        note("notable", f"«{label}»: у мужчин {_pct(_share(men[1], men[2]))}, у женщин {_pct(_share(women[1], women[2]))}.")
-    spread([(okrug, count, total) for okrug, (_, count, total) in zip(okrug_ids, [(0, g[1], g[2]) for g in okrug_groups])],
-           10, f"«{label}»: " + where.replace("группе", "округе") + ".")
-    spread(time_groups, 5, f"«{label}» по времени суток: {where.replace('в группе', 'в блоке')}.")
-
-    if label == "Отказался отвечать":
+        return {"headline": {"level": "info", "text": f"«{label}»: таких анкет в выбранной области нет."}, "metrics": metrics, "sections": []}
+    tables, findings, notable = [], [], []
+    for dim in ("age", "gender", "okrug", "time"):
+        stats, _ = _segment_stats(scope, settings, dim, label)
+        tables.append(_answer_table(dim, stats, label, True))
+        notable += [s for s in stats if s["n"] >= DETAIL_MIN_N and abs(s["z"]) >= Z95]
+    for s in sorted(notable, key=lambda s: -abs(s["z"]))[:4]:
+        findings.append(_find("notable", f"{s['label']} ({DIM_TITLES[s['dim']]}): {s['rate']:.1f}% против {_pct(_share(len(subset), total))} в целом — "
+                                          + ("значимо чаще." if s["z"] > 0 else "значимо реже.")))
+    if not notable:
+        findings.append(_find("info", "Значимых различий между группами нет: доля распределена равномерно."))
+    concentration = _shift_concentration(scope, label, service=True)
+    findings += _quality_findings(scope, label, service=True)
+    sections = [_section("Что видно", findings), _section(f"Профиль «{label}»", tables=tables)]
+    actions = []
+    if refusal:
         people = {}
         for r in scope:
-            entry = people.setdefault(r["shift_id"] or f'{r["surname"]}|{r["name"]}',
-                                      [(r["surname"] + " " + r["name"]).strip(), 0, 0])
+            entry = people.setdefault(_shift_key(r), [(r["surname"] + " " + r["name"]).strip(), 0, 0])
             entry[2] += 1
             entry[1] += r["answer"] == label
-        worst = sorted((e for e in people.values() if e[2] >= 15), key=lambda e: -e[1] / e[2])[:5]
-        if worst:
-            breakdowns.append(_breakdown("Интервьюеры с наибольшей долей отказов", "доля отказов у интервьюера (смены от 15 анкет)",
-                                         [(name, count, total) for name, count, total in worst], overall))
-        if forecast:
-            lead = forecast["rows"][0]
-            note("info", f"В прогнозе отказавшихся распределяют по партиям внутри групп «округ × пол × возраст»: "
-                         f"у лидера ({lead['label']}) это меняет долю на {lead['with_refusals'] - lead['answered']:+.1f} п.п., см. вкладку «Прогноз».")
-    elif not service and forecast:
-        row = next((r for r in forecast["rows"] if r["label"] == label), None)
+        rows = []
+        for name, hit, n in sorted((e for e in people.values() if e[2] >= 15), key=lambda e: -e[1] / e[2])[:6]:
+            z = _z_prop(hit, n, len(subset) - hit, total - n)
+            rows.append([_cell(name), _cell(f"{hit} из {n}"), _cell(f"{hit * 100 / n:.0f}%", bar=hit * 100 / n),
+                         _cell("значимо чаще" if z >= Z95 else "значимо реже" if z <= -Z95 else "в пределах погрешности", "down" if z >= Z95 else "up" if z <= -Z95 else "")])
+        if rows:
+            sections.append(_section("Интервьюеры", tables=[_table("Отказы по интервьюерам (смены от 15 анкет)", ["Интервьюер", "Отказов", "Доля", "Вывод"], rows,
+                                                                     "Сильный разброс говорит о манере опроса, а не только о респондентах.")]))
+        reserve_tables = [_reserve(_segment_stats(scope, settings, dim, focus)[0], dim) for dim in ("age", "okrug")]
+        sections.append(_section(f"Что скрывают отказы для «{focus}»", tables=reserve_tables))
+        row = forecast["rows"][0] if forecast else None
         if row:
-            note("info", f"Прогноз по всем данным: {_pct(row['forecast'])} (± {row['margin']:g} п.п.), поправка к доле ответивших {row['delta']:+g} п.п.")
-            if row["trend"] is not None and abs(row["trend"]) > 1:
-                note("notable", f"Оценка ещё дрейфует: за последние 30% данных она сдвинулась на {row['trend']:+g} п.п.")
-    return _detail_payload("party", label, label, scope, metrics, breakdowns, findings)
-
-
-def group_detail(scope, kind, key, settings):
-    """How a group (gender, age, okrug or hour) differs from the whole area: party split, refusals, mix."""
-    if kind == "gender":
-        subset, title = [r for r in scope if r["gender"] == key], {"Мужской": "Мужчины", "Женский": "Женщины"}[key]
-    elif kind == "age":
-        subset, title = [r for r in scope if r["age"] == key], f"Возраст {key}"
-    elif kind == "okrug":
-        subset, title = [r for r in scope if TIK_TO_OKRUG.get(r["tik"]) == key], f"Округ {key}"
+            findings.append(_find("info", f"В прогнозе отказавшихся распределяют внутри групп «округ × пол × возраст»: у лидера ({row['label']}) это меняет долю на "
+                                          f"{row['with_refusals'] - row['answered']:+.1f} п.п., подробности на вкладке «Прогноз»."))
+        if any(s["dim"] == "okrug" and s["z"] >= Z95 for s in notable):
+            actions.append("Проверить округа с повышенной долей отказов: скрипт обращения, время и место опроса, состав интервьюеров.")
+        if concentration and concentration["flag"]:
+            actions.append("Отказы сосредоточены в нескольких сменах: разобрать эти смены отдельно, возможно, различается манера опроса.")
+        actions.append(f"Отказавшиеся в сегментах, где сильна «{focus}», — главный резерв: см. таблицы выше.")
     else:
-        subset = [r for r in scope if (m := parse_moment(r["created_at"])) and m.astimezone(settings.zone).hour == int(key)]
-        title = f"Час {key}:00–{key}:59"
-    findings = []
+        findings.append(_find("info", "Испорченные бюллетени обычно связаны с протестным голосованием или ошибками заполнения; причину по анкетам определить нельзя."))
+        actions.append("Если доля растёт в одном сегменте, проверить понятность бюллетеня и инструкции этой группе, а также честность заполнения анкет.")
+    sections.append(_section("Что проверить и делать", [_find("info", a) for a in actions]))
+    return {"headline": {"level": "notable" if notable else "info",
+                         "text": f"«{label}»: {_pct(_share(len(subset), total))} анкет ({_fmt_int(len(subset))})."
+                                 + (f" Заметнее всего отличается: {max(notable, key=lambda s: abs(s['z']))['label']}." if notable else "")},
+            "metrics": metrics, "sections": sections}
 
-    def note(level, text):
-        findings.append({"level": level, "text": text})
+
+def group_analysis(scope, kind, key, focus, settings, forecast):
+    """A demographic, territorial or hourly group compared with everyone else, seen from the focus party."""
+    if kind == "gender":
+        belongs, title = (lambda r: r["gender"] == key), {"Мужской": "Мужчины", "Женский": "Женщины"}[key]
+        control = lambda r: (TIK_TO_OKRUG.get(r["tik"], ""), r["age"])
+    elif kind == "age":
+        belongs, title = (lambda r: r["age"] == key), f"Возраст {key}"
+        control = lambda r: (TIK_TO_OKRUG.get(r["tik"], ""), r["gender"])
+    elif kind == "okrug":
+        belongs, title = (lambda r: TIK_TO_OKRUG.get(r["tik"]) == key), f"Округ {key}"
+        control = lambda r: (r["age"], r["gender"])
+    else:
+        belongs = lambda r: (m := parse_moment(r["created_at"])) is not None and m.astimezone(settings.zone).hour == int(key)
+        title, control = f"Час {key}:00–{key}:59", (lambda r: (r["age"], r["gender"]))
+    subset = [r for r in scope if belongs(r)]
+    rest = [r for r in scope if not belongs(r)]
+    named_subset = [r for r in subset if r["answer"] not in SERVICE_ANSWERS]
+    named_rest = [r for r in rest if r["answer"] not in SERVICE_ANSWERS]
+    refusals = lambda rows_: sum(r["answer"] == "Отказался отвечать" for r in rows_)
+    refusal_here, refusal_rest = _share(refusals(subset), len(subset)), _share(refusals(rest), len(rest))
+    metrics = [{"label": "Анкет", "value": _fmt_int(len(subset))}, {"label": "От всех анкет", "value": _pct(_share(len(subset), len(scope)))},
+               {"label": "Отказы", "value": f"{_pct(refusal_here)} (у остальных {_pct(refusal_rest)})"}]
+    if not subset:
+        return {"headline": {"level": "info", "text": f"{title}: анкет в выбранной области нет."}, "metrics": metrics, "sections": []}
+
+    reliability = []
+    shifts = Counter(_shift_key(r) for r in subset)
+    reliability.append(_find("info", f"В группе {_fmt_int(len(subset))} анкет из {len({r['precinct_id'] for r in subset})} УИК, смен интервьюеров: {len(shifts)}."))
+    if len(subset) < DETAIL_MIN_N:
+        reliability.append(_find("warning", f"Анкет мало ({len(subset)}): выводы ниже ненадёжны."))
+    elif len(shifts) <= 2 or shifts.most_common(1)[0][1] * 100 / len(subset) >= 60:
+        reliability.append(_find("warning", "Группа держится на одной-двух сменах: различия могут отражать работу интервьюера или участка, а не саму группу."))
+    z_ref = _z_prop(refusals(subset), len(subset), refusals(rest), len(rest))
+    if len(subset) >= DETAIL_MIN_N and abs(z_ref) >= Z95:
+        reliability.append(_find("notable", f"Отказы {_pct(refusal_here)} против {_pct(refusal_rest)} у остальных — значимо {'чаще' if z_ref > 0 else 'реже'}."))
 
     named_scope = [r for r in scope if r["answer"] not in SERVICE_ANSWERS]
-    named_subset = [r for r in subset if r["answer"] not in SERVICE_ANSWERS]
-    refused = lambda rows_: sum(r["answer"] == "Отказался отвечать" for r in rows_)
-    refusal_here, refusal_all = _share(refused(subset), len(subset)), _share(refused(scope), len(scope))
-    metrics = [{"label": "Анкет", "value": _fmt_int(len(subset))},
-               {"label": "От всех анкет", "value": _pct(_share(len(subset), len(scope)))},
-               {"label": "Отказы", "value": f"{_pct(refusal_here)} (в целом {_pct(refusal_all)})"}]
-    if not subset:
-        note("info", "Анкет в этой группе в выбранной области нет.")
-        return _detail_payload(kind, key, title, scope, metrics, [], findings)
-    if len(subset) < DETAIL_MIN_N:
-        note("info", f"Анкет мало ({len(subset)}): выводы ниже ненадёжны.")
-    if len(subset) >= DETAIL_MIN_N and abs(refusal_here - refusal_all) >= 5:
-        note("notable", f"Доля отказов {_pct(refusal_here)} против {_pct(refusal_all)} в целом.")
+    counts_scope = Counter(r["answer"] for r in named_scope)
+    counts_here, counts_rest = Counter(r["answer"] for r in named_subset), Counter(r["answer"] for r in named_rest)
+    top = [name for name, _ in counts_scope.most_common(7)]
+    party_rows, party_findings = [], []
+    for name in top:
+        here, there = _share(counts_here[name], len(named_subset)), _share(counts_rest[name], len(named_rest))
+        z = _z_prop(counts_here[name], len(named_subset), counts_rest[name], len(named_rest))
+        text, cls = _verdict(z, len(named_subset))
+        party_rows.append([_cell(name, "focus" if name == focus else ""), _cell(f"{here:.1f}%", bar=here), _cell(f"{there:.1f}%"),
+                           _cell(_pp(here - there) if len(named_subset) >= DETAIL_MIN_N else "—", cls), _cell(text, cls)])
+        if len(named_subset) >= DETAIL_MIN_N and abs(z) >= Z95:
+            party_findings.append((abs(z), _find("notable", f"«{name}»: {here:.1f}% в группе против {there:.1f}% у остальных ({_pp(here - there)}) — значимо.")))
+    party_findings = [f for _, f in sorted(party_findings, key=lambda x: -x[0])[:3]]
 
-    breakdowns = []
-    scope_counts, subset_counts = Counter(r["answer"] for r in named_scope), Counter(r["answer"] for r in named_subset)
-    top = [name for name, _ in scope_counts.most_common(7)]
-    breakdowns.append(_breakdown(
-        "Партии среди назвавших партию", "доля среди назвавших в этой группе; чёрная черта — в целом по области",
-        [(name, subset_counts[name], len(named_subset), _share(scope_counts[name], len(named_scope))) for name in top]))
-    if len(named_subset) >= DETAIL_MIN_N:
-        diffs = sorted(((name, _share(subset_counts[name], len(named_subset)), _share(scope_counts[name], len(named_scope))) for name in top),
-                       key=lambda d: -abs(d[1] - d[2]))
-        for name, here, overall in diffs[:3]:
-            if abs(here - overall) >= 5:
-                note("notable", f"«{name}» здесь {_pct(here)} против {_pct(overall)} в целом ({here - overall:+.1f} п.п.).")
-        leader = max(top, key=lambda name: subset_counts[name])
-        note("info", f"Лидер среди назвавших партию: {leader} ({_pct(_share(subset_counts[leader], len(named_subset)))}).")
-    else:
-        note("info", f"Партию назвали только {len(named_subset)} {_people(len(named_subset))}: для выводов по партиям мало данных.")
+    position, actions = [], []
+    order = [name for name, _ in counts_here.most_common()]
+    votes_focus = counts_here[focus]
+    if len(named_subset) >= DETAIL_MIN_N and focus in order:
+        share = votes_focus * 100 / len(named_subset)
+        rest_share = _share(counts_rest[focus], len(named_rest))
+        position.append(_find("info", f"«{focus}» в группе: {share:.1f}%, {order.index(focus) + 1}-е место из {len(order)} (у остальных {rest_share:.1f}%)."))
+        position += _neighbour_findings(order, counts_here, len(named_subset), focus)
+        observed, expected, z = _standardize(named_subset, named_scope, focus, control)
+        if len(named_subset) >= DETAIL_MIN_N:
+            if abs(z) < Z95:
+                position.append(_find("info", f"С учётом состава группы ожидаемая доля {expected:.1f}%, фактическая {observed:.1f}%: расхождение с областью объясняется составом, "
+                                              "а не особенностями самой группы."))
+            else:
+                position.append(_find("notable", f"Даже с учётом состава группы ожидаемая доля {expected:.1f}%, фактическая {observed:.1f}% ({_pp(observed - expected)}, значимо): "
+                                                 "это свойство самой группы, а не её состава."))
+                actions.append(f"В группе «{title}» «{focus}» {'сильнее' if observed > expected else 'слабее'} ожидаемого при таком составе: искать причину в самой группе (тематика, каналы, местный фон).")
+    elif focus in counts_here or counts_scope[focus]:
+        position.append(_find("info", f"Партию назвали только {len(named_subset)} {_people(len(named_subset))}: для выводов о позиции «{focus}» мало данных."))
 
-    for other, labels, field in (("age", AGES, "age"), ("gender", GENDER_LABELS, "gender")):
-        if kind == other:
+    rate_focus = votes_focus / len(named_subset) if len(named_subset) >= DETAIL_MIN_N else None
+    reserve = []
+    if rate_focus is not None and refusals(subset):
+        expected_votes = refusals(subset) * rate_focus
+        reserve.append(_find("info", f"Отказалось {_fmt_int(refusals(subset))} ({_pct(refusal_here)}). При ставке «{focus}» в группе ({rate_focus * 100:.1f}%) это ≈ {_fmt_int(round(expected_votes))} голосов."))
+        if refusal_here >= refusal_rest + 5:
+            actions.append(f"Высокая доля отказов в «{title}»: скрытый резерв для «{focus}» ≈ {_fmt_int(round(expected_votes))} голосов, стоит выяснить причины отказов.")
+
+    mixes = []
+    for dim in ("age", "gender", "okrug", "time"):
+        if (dim == kind) or (kind == "hour" and dim == "time"):
             continue
-        with_field = [r for r in subset if r[field]]
-        scope_field = [r for r in scope if r[field]]
-        here, everywhere = Counter(r[field] for r in with_field), Counter(r[field] for r in scope_field)
-        breakdowns.append(_breakdown(
-            "Возрастной состав" if other == "age" else "Состав по полу", "доля в этой группе; чёрная черта — в целом по области",
-            [(name, here[name], len(with_field), _share(everywhere[name], len(scope_field))) for name in labels]))
-        if len(with_field) >= DETAIL_MIN_N:
-            name, share, overall = max(((n, _share(here[n], len(with_field)), _share(everywhere[n], len(scope_field))) for n in labels),
-                                       key=lambda d: abs(d[1] - d[2]))
-            if abs(share - overall) >= 8:
-                note("notable", f"{'Возрастная группа' if other == 'age' else 'Пол'} {name}: {_pct(share)} этой группы против {_pct(overall)} в целом.")
-    return _detail_payload(kind, key, title, scope, metrics, breakdowns, findings)
+        with_value = [r for r in subset if _dim_value(dim, r, settings)]
+        scope_with = [r for r in scope if _dim_value(dim, r, settings)]
+        if len(with_value) < DETAIL_MIN_N:
+            continue
+        here, there = Counter(_dim_value(dim, r, settings) for r in with_value), Counter(_dim_value(dim, r, settings) for r in scope_with)
+        for raw in _dim_labels(dim):
+            diff = _share(here[raw], len(with_value)) - _share(there[raw], len(scope_with))
+            mixes.append((abs(diff), dim, raw, _share(here[raw], len(with_value)), _share(there[raw], len(scope_with)), diff))
+    mix_rows = [[_cell(_dim_label(dim, raw)), _cell(DIM_TITLES[dim]), _cell(f"{here:.1f}%"), _cell(f"{there:.1f}%"), _cell(_pp(diff), "up" if diff > 0 else "down")]
+                for _, dim, raw, here, there, diff in sorted(mixes, reverse=True)[:6] if abs(diff) >= 5]
+
+    sections = [_section("Надёжность", reliability),
+                _section("Партии в группе и вне её", party_findings, [_table("Расклад среди назвавших партию", ["Партия", "В группе", "Вне группы", "Разница", "Вывод"], party_rows)]),
+                _section(f"Позиция «{focus}»", position)]
+    if mix_rows:
+        sections.append(_section("Чем отличается состав группы", tables=[_table("Заметные отличия состава от области в целом", ["Категория", "Срез", "В группе", "В области", "Разница"], mix_rows)]))
+    if reserve:
+        sections.append(_section("Скрытый резерв", reserve))
+    if not actions:
+        actions.append("Существенных отличий, требующих действий, в группе нет: наблюдать за динамикой.")
+    sections.append(_section("Что проверить и делать", [_find("info", a) for a in actions]))
+    lead = order[0] if order and len(named_subset) >= DETAIL_MIN_N else None
+    headline = f"{title}: {_fmt_int(len(subset))} анкет ({_pct(_share(len(subset), len(scope)))})."
+    if lead:
+        headline += f" Лидирует {lead} ({_pct(_share(counts_here[lead], len(named_subset)))})."
+    return {"headline": {"level": "warning" if any(f["level"] == "warning" for f in reliability) else "info", "text": headline},
+            "metrics": metrics, "sections": sections}
 
 
-def dashboard_detail(values, settings, kind, key, requested_day=None, requested_okrug=None,
+def dashboard_detail(values, settings, kind, key, focus=DEFAULT_FOCUS, requested_day=None, requested_okrug=None,
                      requested_tik=None, requested_precinct=None):
     rows = parse_sheet_rows(values)
     _dates, _day, _day_rows, scope = scope_rows(rows, settings, requested_day, requested_okrug,
                                                  requested_tik, requested_precinct)
+    forecast = forecast_shares(rows, Counter(p["tik"] for p in settings.precincts if p.get("tik")))
+    role = ""
     if kind == "party":
-        forecast = forecast_shares(rows, Counter(p["tik"] for p in settings.precincts if p.get("tik")))
-        return party_detail(scope, key, settings, forecast)
-    return group_detail(scope, kind, key, settings)
+        if key == focus:
+            body, role = focus_detail(scope, focus, settings, forecast), "Ваша партия"
+        elif key in SERVICE_ANSWERS:
+            body, role = answer_detail(scope, key, focus, settings, forecast), "Отказы и испорченные" if key == "Отказался отвечать" else "Испорченные бюллетени"
+        else:
+            body, role = rival_detail(scope, key, focus, settings, forecast), "Конкурент"
+        title = key
+    else:
+        body = group_analysis(scope, kind, key, focus, settings, forecast)
+        title = {"gender": {"Мужской": "Мужчины", "Женский": "Женщины"}.get(key, key), "age": f"Возраст {key}",
+                 "okrug": f"Округ {key}", "hour": f"Час {key}:00–{key}:59"}[kind]
+        role = "Группа"
+    return {"kind": kind, "key": key, "focus": focus, "title": title, "role": role,
+            "subtitle": f"В выбранной области: {_fmt_int(len(scope))} анкет", **body}
 
 
 def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
@@ -1324,19 +1742,21 @@ def create_app(settings=None):
             raise HTTPException(422, "Неизвестный УИК")
 
     @app.get("/api/dashboard/detail", dependencies=[Depends(dashboard_authorized)])
-    def dashboard_detail_view(kind: str, key: str, day: str | None = None, okrug: str | None = None,
-                              tik: str | None = None, precinct: str | None = None):
+    def dashboard_detail_view(kind: str, key: str, focus: str = DEFAULT_FOCUS, day: str | None = None,
+                              okrug: str | None = None, tik: str | None = None, precinct: str | None = None):
         check_scope(day, okrug, tik, precinct)
         valid = {"party": {label for pid, label in PARTIES if pid != "2"}, "gender": set(GENDER_LABELS),
                  "age": set(AGES), "okrug": set(OKRUGS), "hour": {f"{hour:02d}" for hour in range(24)}}
         if kind not in DETAIL_KINDS or key not in valid[kind]:
             raise HTTPException(422, "Неизвестная графа")
+        if focus not in valid["party"] - set(SERVICE_ANSWERS):
+            raise HTTPException(422, "Неизвестная партия")
         try:
             values = cached_sheet_values()
         except Exception as exc:
             LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
             raise HTTPException(502, "Не удалось прочитать Google Таблицу")
-        return dashboard_detail(values, settings, kind, key, day, okrug, tik, precinct)
+        return dashboard_detail(values, settings, kind, key, focus, day, okrug, tik, precinct)
 
     @app.get("/api/dashboard/data", dependencies=[Depends(dashboard_authorized)])
     def dashboard_data(day: str | None = None, okrug: str | None = None,

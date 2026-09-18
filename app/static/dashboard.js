@@ -7,6 +7,8 @@ let interviewersTotal = 0;
 let anomalyPayload = null;
 let lastAgeHeat = null;
 let activeDetail = null;
+let focusParty = 'Новые люди';
+try { focusParty = localStorage.getItem('focusParty') || focusParty; } catch { /* storage may be blocked */ }
 let showClosedAnomalies = false;
 let anomalyRenderPending = false;
 const interviewerSort = {key:'', dir:'desc'};
@@ -151,51 +153,61 @@ function renderAgeHeatmap(heat) {
   $('#ageheat-note').textContent = validOnly ? 'Доля внутри возрастной группы среди ответивших партии (без отказов и испорченных бюллетеней).' : 'Доля внутри возрастной группы от всех её анкет, включая отказы. Яркость — относительно максимума в строке.';
 }
 function detailQuery(kind, key) {
-  const query = new URLSearchParams({kind, key});
+  const query = new URLSearchParams({kind, key, focus: focusParty});
   if (filters.day) query.set('day', filters.day);
   if (filters.okrug) query.set('okrug', filters.okrug);
   if (filters.tik) query.set('tik', filters.tik);
   if (filters.precinct) query.set('precinct', filters.precinct);
   return query;
 }
-function detailCard(anchor) {
-  let card = $('#detail-card');
-  if (!card) { card = document.createElement('section'); card.id = 'detail-card'; card.className = 'panel detail-card'; }
-  if (anchor) {
-    (anchor.closest('.grid.two') || anchor.closest('.panel')).after(card);
-    card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
-  }
-  return card;
+function renderDetailTable(table) {
+  const head = table.columns.map(c => `<th>${escapeHTML(c)}</th>`).join('');
+  const rows = table.rows.map(row => `<tr>${row.map(cell => `<td class="${escapeHTML(cell.cls || '')}">${cell.bar != null ? `<div class="mini"><span>${escapeHTML(cell.t)}</span><i data-w="${cell.bar}"></i></div>` : escapeHTML(cell.t)}</td>`).join('')}</tr>`).join('');
+  return `<div class="dtable-wrap"><h4>${escapeHTML(table.title)}</h4><div class="table-scroll"><table class="dtable"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>${table.note ? `<p class="panel-note">${escapeHTML(table.note)}</p>` : ''}</div>`;
 }
-function renderDetail(data, anchor) {
-  const card = detailCard(anchor);
+function renderDetail(data) {
+  const drawer = $('#detail-drawer'), scroll = drawer.scrollTop;
+  $('#drawer-role').textContent = (data.role || 'Анализ графы').toUpperCase();
+  $('#drawer-title').textContent = data.title;
+  $('#drawer-sub').textContent = `${data.subtitle} · пересчитывается вместе с данными`;
   const metrics = data.metrics.map(m => `<div class="detail-metric"><span>${escapeHTML(m.label)}</span><strong>${escapeHTML(m.value)}</strong></div>`).join('');
-  const findings = data.findings.map(f => `<li class="lvl-${escapeHTML(f.level)}">${escapeHTML(f.text)}</li>`).join('');
-  const breakdowns = data.breakdowns.map(b => {
-    const scale = Math.max(1, ...b.rows.flatMap(r => [r.small ? 0 : r.percent, r.baseline ?? 0]));
-    const rows = b.rows.map(r => `<div class="brow${r.small ? ' small' : ''}"><span class="brow-label" title="${escapeHTML(r.label)}">${escapeHTML(r.label)}</span><div class="btrack" title="${r.baseline != null ? `в целом по области: ${r.baseline}%` : ""}"><i data-w="${r.small ? 0 : r.percent / scale * 100}"></i>${r.baseline != null ? `<b data-w="${r.baseline / scale * 100}"></b>` : ''}</div><span class="brow-value">${r.small ? `мало данных (${r.total})` : `${r.percent}%`}</span></div>`).join('');
-    return `<article class="breakdown"><h3>${escapeHTML(b.title)}</h3><p class="panel-note">${escapeHTML(b.note)}</p>${rows}</article>`;
-  }).join('');
-  card.innerHTML = `<header><div><p class="kicker">АНАЛИЗ ГРАФЫ</p><h2>${escapeHTML(data.title)}</h2><p class="subtle">${escapeHTML(data.subtitle)} · пересчитывается вместе с данными</p></div><button id="detail-close" class="ghost-button" type="button">Закрыть</button></header><div class="detail-metrics">${metrics}</div><ul class="findings">${findings}</ul><div class="detail-grid">${breakdowns}</div>`;
-  card.querySelectorAll('.btrack i').forEach(el => { el.style.width = el.dataset.w + '%'; });
-  card.querySelectorAll('.btrack b').forEach(el => { el.style.left = `calc(${el.dataset.w}% - 1px)`; });
+  const sections = data.sections.map(section => `<section class="dsection"><h3>${escapeHTML(section.title)}</h3>${section.findings.length ? `<ul class="findings">${section.findings.map(f => `<li class="lvl-${escapeHTML(f.level)}">${escapeHTML(f.text)}</li>`).join('')}</ul>` : ''}${section.tables.map(renderDetailTable).join('')}${section.note ? `<p class="panel-note">${escapeHTML(section.note)}</p>` : ''}</section>`).join('');
+  $('#drawer-body').innerHTML = `<div class="headline ${escapeHTML(data.headline.level)}">${escapeHTML(data.headline.text)}</div><div class="detail-metrics">${metrics}</div>${sections}`;
+  drawer.querySelectorAll('.dtable').forEach(table => {
+    const columns = {};
+    table.querySelectorAll('.mini i').forEach(bar => { const index = bar.closest('td').cellIndex; (columns[index] = columns[index] || []).push(bar); });
+    Object.values(columns).forEach(bars => { const top = Math.max(1, ...bars.map(b => Number(b.dataset.w))); bars.forEach(b => { b.style.width = (Number(b.dataset.w) / top * 100) + '%'; }); });
+  });
+  drawer.scrollTop = scroll;
 }
-async function refreshDetail(anchor) {
+function openDrawer() {
+  $('#detail-drawer').hidden = false;
+  document.body.classList.add('drawer-open');
+}
+async function refreshDetail(loading) {
   if (!activeDetail) return;
   const {kind, key} = activeDetail;
+  if (loading) { openDrawer(); $('#drawer-title').textContent = key; $('#drawer-body').innerHTML = '<p class="empty">Считаем…</p>'; }
   try {
     const data = await request('/api/dashboard/detail?' + detailQuery(kind, key));
-    if (activeDetail && activeDetail.kind === kind && activeDetail.key === key) renderDetail(data, anchor);
+    if (activeDetail && activeDetail.kind === kind && activeDetail.key === key) renderDetail(data);
   } catch (error) {
-    if (anchor) { const card = detailCard(anchor); card.innerHTML = `<p class="error">${escapeHTML(error.message)}</p>`; }
+    if (loading) $('#drawer-body').innerHTML = `<p class="error">${escapeHTML(error.message)}</p>`;
   }
+}
+function focusOptions(parties) {
+  const select = $('#focus-party');
+  if (select.options.length) return;
+  const names = parties.map(p => p.label).filter(label => label !== 'Испортил бюллетень' && label !== 'Отказался отвечать');
+  if (!names.includes(focusParty)) focusParty = names.includes('Новые люди') ? 'Новые люди' : names[0];
+  select.innerHTML = names.map(name => option(name, name, focusParty)).join('');
 }
 function markActiveBar() {
   document.querySelectorAll('[data-kind][data-key]').forEach(el => {
     el.classList.toggle('selected', Boolean(activeDetail) && el.dataset.kind === activeDetail.kind && el.dataset.key === activeDetail.key);
   });
 }
-function closeDetail() { activeDetail = null; $('#detail-card')?.remove(); markActiveBar(); }
+function closeDetail() { activeDetail = null; $('#detail-drawer').hidden = true; document.body.classList.remove('drawer-open'); markActiveBar(); }
 function renderSummary(summary) {
   const cards = [
     ['Всего анкет',summary.total,'За выбранный период','accent'],
@@ -334,7 +346,7 @@ function render(data) {
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;
-  markActiveBar(); void refreshDetail();
+  focusOptions(data.parties); markActiveBar(); void refreshDetail();
   $('#updated-at').textContent = 'Обновлено в ' + new Date(data.generated_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 async function load() {
@@ -386,12 +398,17 @@ document.addEventListener('click', event => {
     if (same) { closeDetail(); return; }
     activeDetail = {kind: bar.dataset.kind, key: bar.dataset.key};
     markActiveBar();
-    void refreshDetail(bar);
+    void refreshDetail(true);
   } else if (event.target.closest('#detail-close')) closeDetail();
 });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && activeDetail) closeDetail();
   else if ((event.key === 'Enter' || event.key === ' ') && event.target.matches?.('[data-kind][data-key]')) { event.preventDefault(); event.target.click(); }
+});
+$('#focus-party').addEventListener('change', event => {
+  focusParty = event.target.value;
+  try { localStorage.setItem('focusParty', focusParty); } catch { /* storage may be blocked */ }
+  void refreshDetail(true);
 });
 $('#anomaly-show-closed').addEventListener('change', event => { showClosedAnomalies = event.target.checked; renderAnomalies(); });
 $('#anomalies').addEventListener('focusout', () => setTimeout(() => { if (anomalyRenderPending && !anomalyEditing()) renderAnomalies(); }, 0));
