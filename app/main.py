@@ -25,7 +25,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "app" / "static"
@@ -93,7 +93,7 @@ class Settings:
         self.anomaly_sheet = os.getenv("GOOGLE_ANOMALY_SHEET_NAME", "Аномалии")
         self.dashboard_code = os.getenv("DASHBOARD_CODE", "")
         self.roster_code = os.getenv("ROSTER_CODE", "")
-        self.dashboard_refresh_seconds = max(10, int(os.getenv("DASHBOARD_REFRESH_SECONDS", "30")))
+        self.dashboard_refresh_seconds = max(10, int(os.getenv("DASHBOARD_REFRESH_SECONDS", "60")))
         self.sms_url = os.getenv("SMS_GATEWAY_URL", "")
         self.sms_token = os.getenv("SMS_GATEWAY_TOKEN", "")
         self.sms_number = os.getenv("SMS_REQUEST_NUMBER", "")
@@ -120,6 +120,15 @@ class Profile(StrictModel):
         if not value or any(ord(c) < 32 for c in value):
             raise ValueError("Введите имя без управляющих символов")
         return value
+
+
+MAX_SURVEY_BATCH = 50
+MAX_BATCH_BYTES = 262144
+
+
+class SurveyBatch(StrictModel):
+    """Items stay raw here so that one malformed survey does not reject the other 49."""
+    surveys: list[dict] = Field(min_length=1, max_length=MAX_SURVEY_BATCH)
 
 
 class Survey(StrictModel):
@@ -2079,7 +2088,8 @@ def create_app(settings=None):
             origin = request.headers.get("origin")
             if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
                 return Response("Cross-origin request rejected", status_code=403)
-            if int(request.headers.get("content-length", "0")) > 32768:
+            limit = MAX_BATCH_BYTES if request.url.path == "/api/surveys/batch" else 32768
+            if int(request.headers.get("content-length", "0")) > limit:
                 return Response("Request too large", status_code=413)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -2245,8 +2255,7 @@ def create_app(settings=None):
             state["views"] = {}  # the anomaly block embeds statuses
         return {"ok": True}
 
-    @app.post("/api/surveys", dependencies=[Depends(authorized)])
-    def submit(body: Survey):
+    def check_survey(body):
         precinct = next((p for p in settings.precincts if p["id"] == body.profile.precinct), None)
         # Keep pre-update demo surveys deliverable from the offline queue.
         legacy_demo = body.profile.precinct in {"demo-001", "demo-002", "demo-003"} and body.profile.tik is None
@@ -2260,14 +2269,39 @@ def create_app(settings=None):
             raise HTTPException(422, "Дата анкеты не совпадает с датой смены")
         if settings.refusal_demographics and (not body.gender or not body.age):
             raise HTTPException(422, "Укажите пол и возраст")
+
+    def store_survey(db, body):
         payload = canonical(body)
-        with connect(settings) as db:
-            db.execute("INSERT OR IGNORE INTO surveys(id,payload,received_at) VALUES(?,?,?)",
-                       (str(body.id), payload, datetime.now(timezone.utc).isoformat()))
-            row = db.execute("SELECT payload,exported FROM surveys WHERE id=?", (str(body.id),)).fetchone()
-            if row["payload"] != payload:
-                raise HTTPException(409, "Анкета с этим ID уже содержит другие ответы")
+        db.execute("INSERT OR IGNORE INTO surveys(id,payload,received_at) VALUES(?,?,?)",
+                   (str(body.id), payload, datetime.now(timezone.utc).isoformat()))
+        row = db.execute("SELECT payload,exported FROM surveys WHERE id=?", (str(body.id),)).fetchone()
+        if row["payload"] != payload:
+            raise HTTPException(409, "Анкета с этим ID уже содержит другие ответы")
         return {"id": str(body.id), "saved": True, "sheets_synced": bool(row["exported"])}
+
+    @app.post("/api/surveys", dependencies=[Depends(authorized)])
+    def submit(body: Survey):
+        check_survey(body)
+        with connect(settings) as db:
+            return store_survey(db, body)
+
+    @app.post("/api/surveys/batch", dependencies=[Depends(authorized)])
+    def submit_batch(body: SurveyBatch):
+        """Up to 50 surveys in one request and one database connection. Every item gets its own verdict, so the phone
+        can mark the accepted ones as sent and keep or reject the rest exactly as with single submits."""
+        results = []
+        with connect(settings) as db:
+            for raw in body.surveys:
+                item_id = raw.get("id") if isinstance(raw.get("id"), str) else None
+                try:
+                    survey = Survey.model_validate(raw)
+                    check_survey(survey)
+                    results.append(store_survey(db, survey))
+                except ValidationError:
+                    results.append({"id": item_id, "saved": False, "status": 422, "error": "Анкета заполнена неверно"})
+                except HTTPException as exc:
+                    results.append({"id": item_id, "saved": False, "status": exc.status_code, "error": exc.detail})
+        return {"results": results, "saved": sum(1 for r in results if r["saved"])}
 
     def register_sms_attempt(hashed):
         now = time.time()

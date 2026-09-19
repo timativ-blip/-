@@ -1129,3 +1129,51 @@ def test_kpi_detail_endpoint_validates_key(settings, monkeypatch):
         client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
         assert client.get("/api/dashboard/detail", params={"kind": "kpi", "key": "total"}).status_code == 200
         assert client.get("/api/dashboard/detail", params={"kind": "kpi", "key": "nonsense"}).status_code == 422
+
+
+def batch_of(settings, count, **override):
+    now = datetime.now(timezone.utc)
+    profile = {"id": str(uuid4()), "surname": "Пачка", "name": "Тест", "precinct": settings.precincts[0]["id"],
+               "day": now.astimezone(settings.zone).date().isoformat()}
+    return [{"id": str(uuid4()), "created_at": now.isoformat(), "profile": profile, "party": "11", "gender": "female", "age": "25–34", **override}
+            for _ in range(count)]
+
+
+def test_batch_accepts_many_surveys_and_is_idempotent(client, settings):
+    items = batch_of(settings, 50)
+    first = client.post("/api/surveys/batch", json={"surveys": items})
+    assert first.status_code == 200 and first.json()["saved"] == 50 and all(r["saved"] for r in first.json()["results"])
+    again = client.post("/api/surveys/batch", json={"surveys": items})
+    assert again.status_code == 200 and again.json()["saved"] == 50
+    with connect(settings) as db:
+        assert db.execute("SELECT COUNT(*) FROM surveys").fetchone()[0] == 50  # no duplicates
+
+
+def test_batch_gives_every_item_its_own_verdict(client, settings):
+    good, wrong_precinct, bad_party, conflict = batch_of(settings, 4)
+    wrong_precinct["profile"] = {**wrong_precinct["profile"], "precinct": "no-such-uik"}
+    bad_party["party"] = "999"
+    client.post("/api/surveys", json=conflict)
+    conflict = {**conflict, "party": "1"}  # same id, different answers
+    response = client.post("/api/surveys/batch", json={"surveys": [good, wrong_precinct, bad_party, conflict, {"nonsense": True}]})
+    results = response.json()["results"]
+    assert response.status_code == 200 and response.json()["saved"] == 1
+    assert [r["saved"] for r in results] == [True, False, False, False, False]
+    assert [r.get("status") for r in results[1:]] == [422, 422, 409, 422]
+    assert results[1]["error"] == "Неизвестный УИК" and results[4]["id"] is None
+
+
+def test_batch_limits_and_auth(settings, monkeypatch):
+    monkeypatch.setenv("ACCESS_CODE", "interviewer-secret-code")
+    monkeypatch.setenv("SECRET_KEY", "x" * 40)
+    secured = Settings()
+    with TestClient(create_app(secured)) as client:
+        assert client.post("/api/surveys/batch", json={"surveys": batch_of(secured, 1)}).status_code == 401
+        client.post("/api/login", json={"code": "interviewer-secret-code"})
+        assert client.post("/api/surveys/batch", json={"surveys": []}).status_code == 422
+        assert client.post("/api/surveys/batch", json={"surveys": batch_of(secured, 51)}).status_code == 422
+        assert client.post("/api/surveys/batch", json={"surveys": batch_of(secured, 3)}).json()["saved"] == 3
+
+
+def test_dashboard_refreshes_every_minute_by_default(settings):
+    assert settings.dashboard_refresh_seconds == 60
