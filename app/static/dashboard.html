@@ -112,7 +112,7 @@
       <section class="panel"><header><div><p class="kicker">ПОТОК</p><h2>Последние анкеты</h2></div></header><div id="recent" class="recent"></div></section>
 
       <section class="panel" id="roster-panel"><header><div><p class="kicker">КОМАНДА</p><h2>Сводка интервьюеров</h2><p id="roster-sub" class="subtle">Раздел закрыт отдельным паролем</p></div><button id="roster-lock" class="ghost-button" type="button" hidden>Закрыть раздел</button></header>
-        <form id="roster-login" class="roster-login"><label for="roster-code">Пароль</label><input id="roster-code" type="password" autocomplete="off" required><button class="primary-small" type="submit">Открыть</button><p id="roster-error" class="error" role="alert"></p></form>
+        <div id="roster-login" class="roster-login"><label for="roster-code">Пароль</label><input id="roster-code" type="password" autocomplete="off" required><button id="roster-open" class="primary-small" type="button">Открыть</button><p id="roster-error" class="error" role="alert"></p></div>
         <div id="roster-body" hidden>
           <div id="roster-summary" class="summary roster-summary"></div>
           <div class="roster-filter"><label class="switch"><input id="roster-absent-only" type="checkbox" checked><span class="switch-track"></span><span>Только не вышедшие сегодня</span></label></div>

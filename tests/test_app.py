@@ -953,3 +953,20 @@ def test_roster_code_env_override_and_no_plaintext_in_source(settings):
     assert roster_code_ok("exitpoll") and not roster_code_ok("exitpoll ")
     assert roster_code_ok("другой", override="другой") and not roster_code_ok("exitpoll", override="другой")
     assert "exitpoll" not in (Path(__file__).resolve().parent.parent / "app" / "main.py").read_text(encoding="utf-8")
+
+
+def test_dashboard_assets_revalidate_and_roster_is_not_a_native_form(settings):
+    from pathlib import Path
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/static/dashboard.js").headers["cache-control"] == "no-cache"
+        assert "cache-control" not in client.get("/static/style.css").headers or client.get("/static/style.css").headers["cache-control"] != "no-cache"
+    html = (Path(__file__).resolve().parent.parent / "app" / "static" / "dashboard.html").read_text(encoding="utf-8")
+    assert '<form id="roster-login"' not in html  # an old cached script must never let the password field reload the page
+
+
+def test_dashboard_script_starts_with_strict_mode_and_wires_roster_button():
+    from pathlib import Path
+    script = (Path(__file__).resolve().parent.parent / "app" / "static" / "dashboard.js").read_text(encoding="utf-8")
+    assert script.startswith("'use strict';")
+    assert script.count("$('#roster-open').addEventListener('click', openRoster);") == 1
+    assert "#roster-login').addEventListener" not in script

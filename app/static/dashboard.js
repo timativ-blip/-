@@ -518,13 +518,15 @@ $('#login-form').addEventListener('submit', async event => {
   try { await request('/api/dashboard/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:$('#code').value})}); $('#code').value=''; await load(); }
   catch(error) { $('#login-error').textContent = error.message; }
 });
-$('#roster-login').addEventListener('submit', async event => {
-  event.preventDefault(); $('#roster-error').textContent = '';
+async function openRoster() {
+  $('#roster-error').textContent = '';
   try {
     await request('/api/dashboard/roster/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:$('#roster-code').value})});
     $('#roster-code').value = ''; rosterOpen = true; await loadRoster();
   } catch (error) { $('#roster-error').textContent = error.message; }
-});
+}
+$('#roster-open').addEventListener('click', openRoster);
+$('#roster-code').addEventListener('keydown', event => { if (event.key === 'Enter') void openRoster(); });
 $('#roster-lock').addEventListener('click', () => lockRoster());
 $('#roster-absent-only').addEventListener('change', () => { if (rosterData) renderRoster(rosterData); });
 $('#refresh').addEventListener('click',load);

@@ -1857,6 +1857,8 @@ def create_app(settings=None):
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        elif request.url.path.startswith("/static/dashboard."):
+            response.headers["Cache-Control"] = "no-cache"  # revalidate, so a cached old script never runs with the new page
         return response
 
     @app.get("/api/health")
