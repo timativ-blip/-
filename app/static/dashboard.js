@@ -49,24 +49,36 @@ const PARTY_COLORS = {'Единая Россия':'#2C5FA8', 'КПРФ':'#CF3B34
   'Коммунисты России':'#8E1F3A', 'Испортил бюллетень':'#9AA39C', 'Отказался отвечать':'#D97862'};
 const GENDER_COLORS = {'Мужской':'#3F7CC4', 'Женский':'#B03A6B'};
 const NEUTRAL_COLOR = '#B9C4BA';
+const PARTY_LOGOS = {'Единая Россия':'edinaya-rossiya', 'КПРФ':'kprf', 'ЛДПР':'ldpr', 'Новые люди':'novye-lyudi', 'Справедливая Россия':'spravedlivaya-rossiya',
+  'Зелёные':'zelenye', 'Родина':'rodina', 'Яблоко':'yabloko', 'Партия прямой демократии':'pryamaya-demokratiya', 'Партия пенсионеров':'pensionery',
+  'Коммунисты России':'kommunisty-rossii'};
+let lastParties = null;
 // One hue for every other chart: the bigger the value, the darker and richer the bar (scaled between the chart's own min and max).
 function scaleColor(value, values) {
   const low = Math.min(...values), high = Math.max(...values), from = [196, 216, 190], to = [33, 70, 48];
   const t = high === low ? 0.6 : 0.12 + 0.88 * (value - low) / (high - low);
   return `rgb(${from.map((c, i) => Math.round(c + (to[i] - c) * t)).join(',')})`;
 }
-function renderColumns(target, items, {compact = false, kind = '', keyOf = item => item.label, colors = null} = {}) {
+function renderColumns(target, items, {compact = false, kind = '', keyOf = item => item.label, colors = null, logos = null, fill = false} = {}) {
   const max = Math.max(1, ...items.map(x => x.count));
-  const maxHeight = compact ? 90 : 150;
+  let maxHeight = compact ? 90 : 150;
   const box = $(target);
-  box.innerHTML = `<div class="columns${compact ? ' compact' : ''}">${items.map(item => `<div class="column"${kind ? ` data-kind="${kind}" data-key="${escapeHTML(keyOf(item))}" role="button" tabindex="0"` : ''}><div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="column-bar"></div><div class="column-label" title="${escapeHTML(item.title || item.label)}">${escapeHTML(item.label)}</div></div>`).join('')}</div>`;
+  const logo = item => logos && logos[item.label] ? `<img class="column-logo" src="/static/logos/${logos[item.label]}.png" alt="" width="44" height="40" loading="lazy">` : logos ? '<span class="column-logo"></span>' : '';
+  box.innerHTML = `<div class="columns${compact ? ' compact' : ''}${fill ? ' fill' : ''}">${items.map(item => `<div class="column"${kind ? ` data-kind="${kind}" data-key="${escapeHTML(keyOf(item))}" role="button" tabindex="0"` : ''}>${logo(item)}<div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="column-bar"></div><div class="column-label" title="${escapeHTML(item.title || item.label)}">${escapeHTML(item.label)}</div></div>`).join('')}</div>`;
   // CSP (style-src 'self', no unsafe-inline) drops style="" written via innerHTML;
   // assigning through the DOM style API below is unaffected and actually renders the bar height.
+  if (fill) {  // stretch the bars to the room the panel gives the chart: logo 48 + value 42 + label 34 + gaps
+    const room = box.querySelector('.columns').clientHeight;
+    maxHeight = room > 0 ? Math.max(120, room - 150) : 300;
+  }
   box.querySelectorAll('.column-bar').forEach((el, index) => {
     const item = items[index];
     el.style.height = (item.count ? Math.max(4, item.count / max * maxHeight) : 0) + 'px';
     el.style.background = colors ? (colors[item.label] || NEUTRAL_COLOR) : scaleColor(item.count, items.map(x => x.count));
   });
+}
+function renderPartyChart() {
+  if (lastParties) renderColumns('#party-chart', lastParties, {kind:'party', colors:PARTY_COLORS, logos:PARTY_LOGOS, fill:true});
 }
 function renderNewPeopleAge(groups) {
   renderColumns('#newpeople-age-chart', groups.map(g => ({...g, title: `${g.label}: ${number(g.count)} из ${number(g.total)} анкет`})), {kind:'age'});
@@ -471,7 +483,7 @@ function renderFilters(data) {
   $('#precinct').disabled = !filters.tik;
 }
 function render(data) {
-  renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties,{kind:'party',colors:PARTY_COLORS});
+  renderFilters(data); renderSummary(data.summary); lastParties = data.parties; renderPartyChart();
   renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender',colors:GENDER_COLORS}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
   renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderMap(data.map); renderForecast(data.forecast, data.summary);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
@@ -576,6 +588,7 @@ document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', (
   document.querySelectorAll('.tab').forEach(other => { other.classList.toggle('active', other === tab); other.setAttribute('aria-selected', String(other === tab)); });
   $('#tab-answers').hidden = tab.dataset.tab !== 'answers';
   $('#tab-forecast').hidden = tab.dataset.tab !== 'forecast';
+  if (tab.dataset.tab === 'answers') renderPartyChart();  // bars are sized from the visible height
 }));
 $('#age-heat-valid').addEventListener('change', () => { if (lastAgeHeat) renderAgeHeatmap(lastAgeHeat); });
 document.addEventListener('click', event => {

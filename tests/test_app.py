@@ -1070,3 +1070,14 @@ def test_every_answer_has_a_chart_colour():
     script = (Path(__file__).resolve().parent.parent / "app" / "static" / "dashboard.js").read_text(encoding="utf-8")
     block = script[script.index("const PARTY_COLORS"):script.index("const GENDER_COLORS")]
     assert all(f"'{label}'" in block for _, label in PARTIES)
+
+
+def test_every_party_logo_referenced_by_the_dashboard_exists():
+    import re
+    from pathlib import Path
+    static = Path(__file__).resolve().parent.parent / "app" / "static"
+    script = (static / "dashboard.js").read_text(encoding="utf-8")
+    block = script[script.index("const PARTY_LOGOS"):script.index("let lastParties")]
+    files = re.findall(r":\s*'([a-z-]+)'", block)
+    assert len(files) == 11 and all((static / "logos" / f"{name}.png").stat().st_size > 1000 for name in files)
+    assert sum(f.stat().st_size for f in (static / "logos").iterdir()) < 500_000
