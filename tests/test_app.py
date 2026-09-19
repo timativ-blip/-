@@ -1062,3 +1062,11 @@ def test_interviewer_count_is_unique_people_across_days(settings):
     assert next(o for o in everything["okrug_stats"] if o["okrug"] == TIK_TO_OKRUG[BAL])["interviewers"] == 2
     assert dashboard_snapshot(rows, settings, requested_day="2026-09-19")["summary"]["interviewers"] == 2
     assert dashboard_snapshot(rows, settings, requested_day="2026-09-18")["summary"]["interviewers"] == 1
+
+
+def test_every_answer_has_a_chart_colour():
+    from pathlib import Path
+    from app.main import PARTIES
+    script = (Path(__file__).resolve().parent.parent / "app" / "static" / "dashboard.js").read_text(encoding="utf-8")
+    block = script[script.index("const PARTY_COLORS"):script.index("const GENDER_COLORS")]
+    assert all(f"'{label}'" in block for _, label in PARTIES)

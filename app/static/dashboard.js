@@ -44,7 +44,18 @@ function showLogin(message = '') {
 function showDashboard() { $('#login-view').hidden = true; $('#dashboard').hidden = false; }
 function status(kind, text) { $('#live-status').className = `live ${kind}`; $('#live-status span').textContent = text; }
 
-function renderColumns(target, items, {compact = false, kind = '', keyOf = item => item.label} = {}) {
+const PARTY_COLORS = {'Единая Россия':'#2C5FA8', 'КПРФ':'#CF3B34', 'ЛДПР':'#E2A91B', 'Новые люди':'#1AA7A0', 'Справедливая Россия':'#F0862A',
+  'Зелёные':'#5BA44F', 'Родина':'#8B4A3A', 'Яблоко':'#88B04B', 'Партия прямой демократии':'#7A5BB5', 'Партия пенсионеров':'#B5678F',
+  'Коммунисты России':'#8E1F3A', 'Испортил бюллетень':'#9AA39C', 'Отказался отвечать':'#D97862'};
+const GENDER_COLORS = {'Мужской':'#3F7CC4', 'Женский':'#B03A6B'};
+const NEUTRAL_COLOR = '#B9C4BA';
+// One hue for every other chart: the bigger the value, the darker and richer the bar (scaled between the chart's own min and max).
+function scaleColor(value, values) {
+  const low = Math.min(...values), high = Math.max(...values), from = [196, 216, 190], to = [33, 70, 48];
+  const t = high === low ? 0.6 : 0.12 + 0.88 * (value - low) / (high - low);
+  return `rgb(${from.map((c, i) => Math.round(c + (to[i] - c) * t)).join(',')})`;
+}
+function renderColumns(target, items, {compact = false, kind = '', keyOf = item => item.label, colors = null} = {}) {
   const max = Math.max(1, ...items.map(x => x.count));
   const maxHeight = compact ? 90 : 150;
   const box = $(target);
@@ -54,6 +65,7 @@ function renderColumns(target, items, {compact = false, kind = '', keyOf = item 
   box.querySelectorAll('.column-bar').forEach((el, index) => {
     const item = items[index];
     el.style.height = (item.count ? Math.max(4, item.count / max * maxHeight) : 0) + 'px';
+    el.style.background = colors ? (colors[item.label] || NEUTRAL_COLOR) : scaleColor(item.count, items.map(x => x.count));
   });
 }
 function renderNewPeopleAge(groups) {
@@ -342,7 +354,7 @@ function renderHours(items) {
   const max = Math.max(1, ...items.map(x => x.count));
   const box = $('#hours-chart');
   box.innerHTML = items.map(item => `<div class="hour"${item.count ? ` data-kind="hour" data-key="${escapeHTML(item.hour.slice(0,2))}" role="button" tabindex="0"` : ''}><b>${item.count || ''}</b><i></i><span>${escapeHTML(item.hour.slice(0,2))}</span></div>`).join('');
-  box.querySelectorAll('.hour i').forEach((el, index) => { el.style.height = Math.max(3, items[index].count / max * 145) + 'px'; });
+  box.querySelectorAll('.hour i').forEach((el, index) => { el.style.height = Math.max(3, items[index].count / max * 145) + 'px'; el.style.background = scaleColor(items[index].count, items.map(x => x.count)); });
 }
 function renderGeo(data) {
   const level = filters.tik ? 'uik' : (filters.okrug ? 'tik' : 'okrug');
@@ -459,8 +471,8 @@ function renderFilters(data) {
   $('#precinct').disabled = !filters.tik;
 }
 function render(data) {
-  renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties,{kind:'party'});
-  renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender'}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
+  renderFilters(data); renderSummary(data.summary); renderColumns('#party-chart',data.parties,{kind:'party',colors:PARTY_COLORS});
+  renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender',colors:GENDER_COLORS}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
   renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderMap(data.map); renderForecast(data.forecast, data.summary);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
