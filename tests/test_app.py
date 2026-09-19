@@ -991,3 +991,60 @@ def test_roster_activity_from_last_anketa(settings):
     assert [p["name"] for p in okrug["people"]] == ["Молчит И", "Пауза И", "Активный И"] and okrug["silent"] == 1
     late = build_roster(values, settings, datetime(2026, 9, 19, 20, 30, tzinfo=settings.zone))
     assert {p["activity"] for o in late["okrugs"] for p in o["people"]} == {"done"}
+
+
+def make_counting_sheet(monkeypatch, values=()):
+    calls = {"n": 0}
+
+    def fake(_settings):
+        calls["n"] += 1
+        return list(values)
+    monkeypatch.setattr("app.main.read_sheet", fake)
+    return calls
+
+
+def test_dashboard_requests_do_not_read_the_sheet(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    settings.dashboard_refresh_seconds = 3600
+    calls = make_counting_sheet(monkeypatch)
+    monkeypatch.setattr("app.main.read_anomaly_statuses", lambda _s, session=None: {})
+    with TestClient(create_app(settings)) as client:
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        client.post("/api/dashboard/roster/login", json={"code": "exitpoll"})
+        first = client.get("/api/dashboard/data")
+        assert first.status_code == 200 and first.json()["data_age"] is not None
+        baseline = calls["n"]
+        for _ in range(5):
+            assert client.get("/api/dashboard/data").status_code == 200
+            assert client.get("/api/dashboard/data", params={"okrug": "118"}).status_code == 200
+            assert client.get("/api/dashboard/roster").status_code == 200
+        assert calls["n"] == baseline  # one background read serves every request
+
+
+def test_background_refresh_keeps_previous_snapshot_when_sheets_fails(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    settings.dashboard_refresh_seconds = 3600
+    state = {"fail": False}
+    rows = mk_rows(settings, [(BAL, 3, FOCUS, "Мужской", "25–34", "a")])
+
+    def fake(_settings):
+        if state["fail"]:
+            raise RuntimeError("Sheets down")
+        return rows
+    monkeypatch.setattr("app.main.read_sheet", fake)
+    monkeypatch.setattr("app.main.read_anomaly_statuses", lambda _s, session=None: {})
+    with TestClient(create_app(settings)) as client:
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        assert client.get("/api/dashboard/data", params={"day": "2026-09-16"}).json()["summary"]["total"] == 3
+        state["fail"] = True
+        assert client.get("/api/dashboard/data", params={"day": "2026-09-16"}).json()["summary"]["total"] == 3  # still served
+
+
+def test_health_is_light_and_needs_no_sheet(settings, monkeypatch):
+    def boom(_settings):
+        raise AssertionError("health must not touch the sheet")
+    monkeypatch.setattr("app.main.read_sheet", boom)
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/health").json() == {"ok": True}

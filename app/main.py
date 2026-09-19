@@ -93,6 +93,7 @@ class Settings:
         self.anomaly_sheet = os.getenv("GOOGLE_ANOMALY_SHEET_NAME", "Аномалии")
         self.dashboard_code = os.getenv("DASHBOARD_CODE", "")
         self.roster_code = os.getenv("ROSTER_CODE", "")
+        self.dashboard_refresh_seconds = max(10, int(os.getenv("DASHBOARD_REFRESH_SECONDS", "30")))
         self.sms_url = os.getenv("SMS_GATEWAY_URL", "")
         self.sms_token = os.getenv("SMS_GATEWAY_TOKEN", "")
         self.sms_number = os.getenv("SMS_REQUEST_NUMBER", "")
@@ -1793,23 +1794,37 @@ def create_app(settings=None):
                 LOG.warning("Sheets export failed (%s); retry in 30 seconds", type(exc).__name__)
             await asyncio.sleep(30)
 
+    async def refresher():
+        """Keep one ready-made dashboard snapshot in memory; the slow Sheets read and the maths run off the event loop."""
+        while True:
+            try:
+                await asyncio.to_thread(refresh_dashboard)
+            except Exception as exc:
+                LOG.warning("Dashboard refresh failed (%s); serving the previous snapshot", type(exc).__name__)
+            await asyncio.sleep(settings.dashboard_refresh_seconds)
+
     @asynccontextmanager
     async def lifespan(app):
-        task = asyncio.create_task(exporter())
+        tasks = [asyncio.create_task(exporter())]
+        if settings.spreadsheet:
+            tasks.append(asyncio.create_task(refresher()))
         yield
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     app = FastAPI(title="Exit Poll", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
     failures = {}
-    dashboard_cache = {"at": 0.0, "values": []}
-    dashboard_lock = threading.Lock()
-    anomaly_cache = {"at": 0.0, "values": {}, "ok": True}
-    anomaly_lock = threading.Lock()
+    # Dashboard state: raw sheet values and anomaly statuses refreshed in the background, plus finished views per data version.
+    state = {"values": None, "statuses": {}, "statuses_ok": True, "loaded_at": 0.0, "version": 0, "views": {}}
+    state_lock = threading.Lock()  # short critical sections only
+    refresh_lock = threading.Lock()  # one Sheets read at a time
+    compute_lock = threading.Lock()  # one heavy calculation at a time, so intake threads keep their CPU share
 
     def signed(value):
         return hmac.new(settings.secret.encode(), value.encode(), hashlib.sha256).hexdigest()
@@ -1839,24 +1854,63 @@ def create_app(settings=None):
             pass
         raise HTTPException(401, "Введите код координатора")
 
-    def cached_sheet_values():
-        with dashboard_lock:
-            if time.monotonic() - dashboard_cache["at"] < 25:
-                return dashboard_cache["values"]
+    def refresh_dashboard(warm=True):
+        """Read the sheet and statuses, publish them, and pre-build the default views. Runs in a worker thread."""
+        with refresh_lock:
             values = read_sheet(settings)
-            dashboard_cache.update(at=time.monotonic(), values=values)
-            return values
+            try:
+                statuses, ok = read_anomaly_statuses(settings), True
+            except Exception as exc:
+                LOG.warning("Anomaly statuses read failed (%s)", type(exc).__name__)
+                statuses, ok = None, False
+            with state_lock:
+                state["values"] = values
+                if statuses is not None:
+                    state["statuses"] = statuses
+                state.update(statuses_ok=ok, loaded_at=time.monotonic(), version=state["version"] + 1, views={})
+        if not warm:  # called from inside a request that already holds compute_lock
+            return
+        for compute in (lambda: dashboard_view(None, None, None, None), roster_view):
+            try:
+                compute()
+            except Exception as exc:
+                LOG.warning("Dashboard warm-up failed (%s)", type(exc).__name__)
 
-    def cached_anomaly_statuses():
-        with anomaly_lock:
-            if time.monotonic() - anomaly_cache["at"] >= 25:
-                try:
-                    anomaly_cache.update(values=read_anomaly_statuses(settings), ok=True)
-                except Exception as exc:
-                    LOG.warning("Anomaly statuses read failed (%s)", type(exc).__name__)
-                    anomaly_cache.update(ok=False)
-                anomaly_cache["at"] = time.monotonic()
-            return dict(anomaly_cache["values"]), anomaly_cache["ok"]
+    def sheet_values():
+        if state["values"] is None:  # cold start or the first refresh has not finished yet
+            try:
+                refresh_dashboard(warm=False)
+            except Exception as exc:
+                LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
+                raise HTTPException(502, "Не удалось прочитать Google Таблицу")
+        return state["values"]
+
+    def cached_view(key, compute):
+        with compute_lock:
+            with state_lock:
+                version, hit = state["version"], state["views"].get(key)
+            if hit is not None:
+                return hit
+            result = compute()
+            with state_lock:
+                if state["version"] == version:
+                    if len(state["views"]) >= 64:
+                        state["views"].clear()
+                    state["views"][key] = result
+            return result
+
+    def dashboard_view(day, okrug, tik, precinct):
+        def compute():
+            snapshot = dashboard_snapshot(sheet_values(), settings, day, okrug, tik, precinct, dict(state["statuses"]))
+            snapshot["anomalies"]["statuses_ok"] = state["statuses_ok"]
+            return snapshot
+        return cached_view(("data", day, okrug, tik, precinct), compute)
+
+    def roster_view():
+        return cached_view(("roster",), lambda: build_roster(sheet_values(), settings))
+
+    def data_age():
+        return round(time.monotonic() - state["loaded_at"]) if state["loaded_at"] else None
 
     @app.middleware("http")
     async def security(request, call_next):
@@ -1878,8 +1932,8 @@ def create_app(settings=None):
         return response
 
     @app.get("/api/health")
-    def health():
-        return {"ok": True}
+    async def health():
+        return {"ok": True}  # no database, no sheet, no calculations
 
     @app.get("/api/config")
     def config():
@@ -1980,12 +2034,7 @@ def create_app(settings=None):
 
     @app.get("/api/dashboard/roster", dependencies=[Depends(dashboard_authorized), Depends(roster_authorized)])
     def roster_data():
-        try:
-            values = cached_sheet_values()
-        except Exception as exc:
-            LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
-            raise HTTPException(502, "Не удалось прочитать Google Таблицу")
-        return build_roster(values, settings)
+        return {**roster_view(), "data_age": data_age()}
 
     @app.get("/api/dashboard/detail", dependencies=[Depends(dashboard_authorized)])
     def dashboard_detail_view(kind: str, key: str, focus: str = DEFAULT_FOCUS, day: str | None = None,
@@ -1997,33 +2046,23 @@ def create_app(settings=None):
             raise HTTPException(422, "Неизвестная графа")
         if focus not in valid["party"] - set(SERVICE_ANSWERS):
             raise HTTPException(422, "Неизвестная партия")
-        try:
-            values = cached_sheet_values()
-        except Exception as exc:
-            LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
-            raise HTTPException(502, "Не удалось прочитать Google Таблицу")
-        return dashboard_detail(values, settings, kind, key, focus, day, okrug, tik, precinct)
+        return cached_view(("detail", kind, key, focus, day, okrug, tik, precinct),
+                           lambda: dashboard_detail(sheet_values(), settings, kind, key, focus, day, okrug, tik, precinct))
 
     @app.get("/api/dashboard/data", dependencies=[Depends(dashboard_authorized)])
     def dashboard_data(day: str | None = None, okrug: str | None = None,
                         tik: str | None = None, precinct: str | None = None):
         check_scope(day, okrug, tik, precinct)
-        try:
-            values = cached_sheet_values()
-        except Exception as exc:
-            LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
-            raise HTTPException(502, "Не удалось прочитать Google Таблицу")
-        statuses, statuses_ok = cached_anomaly_statuses()
-        snapshot = dashboard_snapshot(values, settings, day, okrug, tik, precinct, statuses)
-        snapshot["anomalies"]["statuses_ok"] = statuses_ok
-        return snapshot
+        return {**dashboard_view(day, okrug, tik, precinct), "data_age": data_age()}
 
     @app.post("/api/dashboard/anomalies/status", dependencies=[Depends(dashboard_authorized)])
     def anomaly_status(body: AnomalyStatus):
         if not settings.spreadsheet:
             raise HTTPException(503, "Google Таблица не подключена")
         try:
-            known = {item["id"]: item for item in detect_anomalies(parse_sheet_rows(cached_sheet_values()), settings)}
+            known = {item["id"]: item for item in detect_anomalies(parse_sheet_rows(sheet_values()), settings)}
+        except HTTPException:
+            raise
         except Exception as exc:
             LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
             raise HTTPException(502, "Не удалось прочитать Google Таблицу")
@@ -2035,14 +2074,14 @@ def create_app(settings=None):
                   "updated_at": datetime.now(settings.zone).isoformat(timespec="seconds"),
                   "interviewer": item["interviewer"], "rule": item["rule"], "day": item["day"],
                   "tik": item["tik"], "precinct": item["precinct"]}
-        with anomaly_lock:
-            try:
-                write_anomaly_status(settings, record)
-            except Exception as exc:
-                LOG.warning("Anomaly status write failed (%s)", type(exc).__name__)
-                raise HTTPException(502, "Не удалось сохранить статус в Google Таблице")
-            anomaly_cache["values"][body.id] = {"status": body.status, "note": note,
-                                                "updated_at": record["updated_at"]}
+        try:
+            write_anomaly_status(settings, record)
+        except Exception as exc:
+            LOG.warning("Anomaly status write failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "Не удалось сохранить статус в Google Таблице")
+        with state_lock:
+            state["statuses"] = {**state["statuses"], body.id: {"status": body.status, "note": note, "updated_at": record["updated_at"]}}
+            state["views"] = {}  # the anomaly block embeds statuses
         return {"ok": True}
 
     @app.post("/api/surveys", dependencies=[Depends(authorized)])
@@ -2069,11 +2108,7 @@ def create_app(settings=None):
                 raise HTTPException(409, "Анкета с этим ID уже содержит другие ответы")
         return {"id": str(body.id), "saved": True, "sheets_synced": bool(row["exported"])}
 
-    @app.post("/api/sms/request", dependencies=[Depends(authorized)])
-    async def request_sms(body: SmsRequest):
-        if not settings.sms_url or not settings.sms_token:
-            raise HTTPException(503, "SMS-сервис ещё не подключён")
-        hashed = signed("phone:" + body.phone)
+    def register_sms_attempt(hashed):
         now = time.time()
         with connect(settings) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -2084,6 +2119,13 @@ def create_app(settings=None):
             if recent >= 100:
                 raise HTTPException(429, "Лимит SMS. Обратитесь к координатору")
             db.execute("INSERT OR REPLACE INTO sms_attempts VALUES(?,?)", (hashed, now))
+
+    @app.post("/api/sms/request", dependencies=[Depends(authorized)])
+    async def request_sms(body: SmsRequest):
+        if not settings.sms_url or not settings.sms_token:
+            raise HTTPException(503, "SMS-сервис ещё не подключён")
+        hashed = signed("phone:" + body.phone)
+        await asyncio.to_thread(register_sms_attempt, hashed)  # SQLite must not block the event loop
         text = ("Exit Poll. За какую партию Вы проголосовали? "
                 + "; ".join(f"{i}: {label}" for i, label in PARTIES if i not in ("2", "spoiled", "refused"))
                 + ". 12: испортил бюллетень; 13: отказ. Пол: М/Ж. Возраст: 18–24, 25–34, 35–44, 45–60, 61+. "

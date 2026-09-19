@@ -516,7 +516,10 @@ async function load() {
   if (filters.day) query.set('day',filters.day); if (filters.okrug) query.set('okrug',filters.okrug);
   if (filters.tik) query.set('tik',filters.tik); if (filters.precinct) query.set('precinct',filters.precinct);
   try {
-    const data = await request('/api/dashboard/data?' + query); render(data); showDashboard(); status('ready','Данные актуальны');
+    const data = await request('/api/dashboard/data?' + query); render(data); showDashboard();
+    const stale = data.data_age !== null && data.data_age > 180;
+    status(stale ? 'error' : 'ready', stale ? 'Данные устарели' : 'Данные актуальны');
+    if (stale) { $('#data-error').textContent = `Google Таблица не читается уже ${Math.round(data.data_age / 60)} мин: показаны последние полученные данные.`; $('#data-error').hidden = false; }
   } catch (error) {
     if (error.status === 401) return showLogin('Сессия завершилась. Введите код ещё раз.');
     $('#data-error').textContent = error.message; $('#data-error').hidden = false; status('error','Ошибка обновления');
