@@ -469,21 +469,30 @@ function render(data) {
   $('#updated-at').textContent = 'Обновлено в ' + new Date(data.generated_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 let rosterOpen = false;
-const ROSTER_STATUS = {absent: ['Нет сегодня', 'roster-absent'], new: ['Новый сегодня', 'roster-new'], both: ['Работает', 'roster-both']};
+const ROSTER_STATUS = {absent: ['Нет сегодня', 'roster-absent'], new: ['Новый сегодня', 'roster-new'], both: ['Вышел', 'roster-both']};
+const ROSTER_ACTIVITY = {active: ['Работает', 'roster-both'], pause: ['Пауза', 'roster-pause'], silent: ['Молчит', 'roster-absent'], done: ['Смена окончена', 'roster-new']};
+function agoLabel(minutes) {
+  if (minutes === null) return '—';
+  if (minutes < 1) return 'только что';
+  return minutes < 60 ? `${minutes} мин назад` : `${Math.floor(minutes / 60)} ч ${minutes % 60} мин назад`;
+}
 function renderRoster(data) {
-  const totals = data.totals, absentOnly = $('#roster-absent-only').checked;
+  const totals = data.totals, view = $('#roster-view').value;
   $('#roster-sub').textContent = `Вчера ${dateLabel(data.yesterday)} · сегодня ${dateLabel(data.today)}`;
-  $('#roster-summary').innerHTML = [['Вчера работали', totals.yesterday, ''], ['Сегодня вышли', totals.today, ''], ['Нет сегодня', totals.absent, 'warn'], ['Новые сегодня', totals.new, '']]
+  $('#roster-summary').innerHTML = [['Вчера работали', totals.yesterday, ''], ['Сегодня вышли', totals.today, ''], ['Нет сегодня', totals.absent, 'warn'],
+    ['Работают сейчас', totals.active, ''], ['Пауза до часа', totals.pause, ''], ['Молчат больше часа', totals.silent, 'warn']]
     .map(([label, value, tone]) => `<article class="metric ${tone}"><span>${label}</span><strong>${number(value)}</strong></article>`).join('');
+  const keep = {absent: p => p.status === 'absent', silent: p => p.activity === 'silent', today: p => p.status !== 'absent', all: () => true}[view];
   $('#roster-okrugs').innerHTML = data.okrugs.map(item => {
-    const people = absentOnly ? item.people.filter(p => p.status === 'absent') : item.people;
+    const people = item.people.filter(keep);
     if (!item.people.length) return '';
     const rows = people.map(p => {
-      const [label, tone] = ROSTER_STATUS[p.status];
-      const note = p.status === 'absent' ? (p.replaced_by.length ? `Замена: ${escapeHTML(p.replaced_by.join(', '))}` : '') : '';
-      return `<tr><td>${escapeHTML(p.name)}</td><td>${escapeHTML(p.tik)}</td><td>${escapeHTML(p.precinct)}</td><td class="num">${number(p.yesterday)}</td><td class="num">${number(p.today)}</td><td>${p.last_yesterday || '—'}</td><td><span class="roster-chip ${tone}">${label}</span> ${note}</td></tr>`;
+      const [label, tone] = p.activity ? ROSTER_ACTIVITY[p.activity] : ROSTER_STATUS[p.status];
+      const note = p.status === 'absent' && p.replaced_by.length ? `Замена: ${escapeHTML(p.replaced_by.join(', '))}` : p.status === 'new' ? 'новый сегодня' : '';
+      const last = p.last_today ? `${p.last_today} · ${agoLabel(p.minutes_since)}` : '—';
+      return `<tr><td>${escapeHTML(p.name)}</td><td>${escapeHTML(p.tik)}</td><td>${escapeHTML(p.precinct)}</td><td class="num">${number(p.yesterday)}</td><td class="num">${number(p.today)}</td><td>${p.last_yesterday || '—'}</td><td>${last}</td><td><span class="roster-chip ${tone}">${label}</span> ${note}</td></tr>`;
     }).join('');
-    return `<details class="roster-okrug" ${item.absent ? 'open' : ''}><summary><strong>Округ ${escapeHTML(item.okrug)}</strong><span>вчера ${item.yesterday} · сегодня ${item.today} · нет сегодня <b>${item.absent}</b> · новых ${item.new}</span></summary>${people.length ? `<div class="table-scroll"><table><thead><tr><th>Интервьюер</th><th>ТИК</th><th>УИК</th><th>Вчера</th><th>Сегодня</th><th>Был в</th><th>Статус</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="panel-note">Все вчерашние интервьюеры уже вышли.</p>'}</details>`;
+    return `<details class="roster-okrug" ${item.absent || item.silent ? 'open' : ''}><summary><strong>Округ ${escapeHTML(item.okrug)}</strong><span>вчера ${item.yesterday} · сегодня ${item.today} · нет сегодня <b>${item.absent}</b> · молчат <b>${item.silent}</b> · пауза ${item.pause}</span></summary>${people.length ? `<div class="table-scroll"><table><thead><tr><th>Интервьюер</th><th>ТИК</th><th>УИК</th><th>Вчера</th><th>Сегодня</th><th>Вчера был в</th><th>Последняя анкета сегодня</th><th>Статус</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="panel-note">В этом фильтре никого нет.</p>'}</details>`;
   }).join('');
 }
 function lockRoster(message = '') {
@@ -528,7 +537,7 @@ async function openRoster() {
 $('#roster-open').addEventListener('click', openRoster);
 $('#roster-code').addEventListener('keydown', event => { if (event.key === 'Enter') void openRoster(); });
 $('#roster-lock').addEventListener('click', () => lockRoster());
-$('#roster-absent-only').addEventListener('change', () => { if (rosterData) renderRoster(rosterData); });
+$('#roster-view').addEventListener('change', () => { if (rosterData) renderRoster(rosterData); });
 $('#refresh').addEventListener('click',load);
 $('#day').addEventListener('change',event => { filters.day=event.target.value; filters.precinct=''; load(); });
 $('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });

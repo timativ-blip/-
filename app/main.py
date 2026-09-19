@@ -1437,6 +1437,9 @@ def dashboard_detail(values, settings, kind, key, focus=DEFAULT_FOCUS, requested
             "subtitle": f"В выбранной области: {_fmt_int(len(scope))} анкет", **body}
 
 
+ROSTER_ACTIVE_MINUTES = 20  # last anketa no older than this: working
+ROSTER_PAUSE_MINUTES = 60  # older than active but within this: on a pause; beyond: silent
+ROSTER_SHIFT_END_HOUR = 20  # after voting closes nobody is "silent"
 ROSTER_SALT = b"exit-poll-roster-v1"
 # PBKDF2 hash of the roster password, so the password itself is not stored in Git; ROSTER_CODE in the environment overrides it.
 ROSTER_HASH = "afa8cfd8ad0b9e85d4d0e2965b913345eac477cb103dc7e4457011675d0dd142"
@@ -1487,21 +1490,34 @@ def build_roster(values, settings, now=None):
         name = entry["names"].most_common(1)[0][0]
         precinct = (entry["days"][yesterday] or entry["days"][today]).most_common(1)[0][0]
         status = "both" if was and is_now else "absent" if was else "new"
+        minutes = activity = None
+        if is_now and today in entry["last"]:
+            minutes = max(0, int((moment - entry["last"][today]).total_seconds() // 60))
+            activity = ("done" if moment.hour >= ROSTER_SHIFT_END_HOUR else "active" if minutes <= ROSTER_ACTIVE_MINUTES
+                        else "pause" if minutes <= ROSTER_PAUSE_MINUTES else "silent")
         replaced_by = [other for other in today_uik.get(precinct, []) if other != name] if status == "absent" else []
         okrugs[TIK_TO_OKRUG[tik]]["people"].append({
             "name": name, "tik": tik, "precinct": precinct, "status": status, "yesterday": was, "today": is_now,
             "last_yesterday": entry["last"][yesterday].strftime("%H:%M") if yesterday in entry["last"] else None,
             "first_today": entry["first"][today].strftime("%H:%M") if today in entry["first"] else None,
+            "last_today": entry["last"][today].strftime("%H:%M") if today in entry["last"] else None,
+            "minutes_since": minutes, "activity": activity,
             "replaced_by": replaced_by})
     order = {"absent": 0, "new": 1, "both": 2}
     result = []
     for item in okrugs.values():
-        item["people"].sort(key=lambda p: (order[p["status"]], -p["yesterday"], p["name"]))
+        item["people"].sort(key=lambda p: (order[p["status"]] if p["status"] == "absent" else 1,
+                                            -p["yesterday"] if p["status"] == "absent" else -(p["minutes_since"] or 0), p["name"]))
         counts = Counter(p["status"] for p in item["people"])
         result.append({"okrug": item["okrug"], "yesterday": counts["absent"] + counts["both"], "today": counts["new"] + counts["both"],
                        "absent": counts["absent"], "new": counts["new"], "both": counts["both"], "people": item["people"]})
     totals = {key: sum(item[key] for item in result) for key in ("yesterday", "today", "absent", "new", "both")}
-    return {"today": today, "yesterday": yesterday, "generated_at": moment.isoformat(), "totals": totals, "okrugs": result}
+    for level in ("active", "pause", "silent"):
+        totals[level] = sum(1 for item in result for p in item["people"] if p["activity"] == level)
+    for item in result:
+        item["silent"] = sum(1 for p in item["people"] if p["activity"] == "silent")
+        item["pause"] = sum(1 for p in item["people"] if p["activity"] == "pause")
+    return {"today": today, "yesterday": yesterday, "generated_at": moment.isoformat(), "totals": totals, "thresholds": {"active": ROSTER_ACTIVE_MINUTES, "pause": ROSTER_PAUSE_MINUTES}, "okrugs": result}
 
 
 def build_map_data(day_rows):

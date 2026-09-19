@@ -912,7 +912,7 @@ def test_roster_lists_interviewers_missing_today_by_okrug(settings):
                                       ("2026-09-17", BAL, "Старый", "Давно", 9)])
     roster = build_roster(values, settings, now)
     assert roster["today"] == "2026-09-19" and roster["yesterday"] == "2026-09-18"
-    assert roster["totals"] == {"yesterday": 3, "today": 3, "absent": 1, "new": 1, "both": 2}
+    assert {k: roster["totals"][k] for k in ("yesterday", "today", "absent", "new", "both")} == {"yesterday": 3, "today": 3, "absent": 1, "new": 1, "both": 2}
     people = {p["name"]: p for okrug in roster["okrugs"] for p in okrug["people"]}
     assert people["Петров Олег"]["status"] == "absent" and people["Петров Олег"]["yesterday"] == 4
     assert people["Иванова Анна"]["status"] == "both" and people["Новиков Иван"]["status"] == "new"
@@ -970,3 +970,24 @@ def test_dashboard_script_starts_with_strict_mode_and_wires_roster_button():
     assert script.startswith("'use strict';")
     assert script.count("$('#roster-open').addEventListener('click', openRoster);") == 1
     assert "#roster-login').addEventListener" not in script
+
+
+def test_roster_activity_from_last_anketa(settings):
+    from app.main import build_roster
+    day = "2026-09-19"
+    precinct = next(p for p in settings.precincts if p["tik"] == BAL)
+
+    def rows(surname, times):
+        return [[f"{surname}{i}", f"{day}T{t}:00+03:00", day, surname, "И", precinct["id"], precinct["label"], "Единая Россия", "Мужской",
+                 "25–34", surname, f"{day}T{t}:00+03:00", BAL] for i, t in enumerate(times)]
+    values = rows("Активный", ["12:50", "13:50"]) + rows("Пауза", ["13:00"]) + rows("Молчит", ["11:00", "11:30"])
+    roster = build_roster(values, settings, datetime(2026, 9, 19, 14, 0, tzinfo=settings.zone))
+    people = {p["name"]: p for o in roster["okrugs"] for p in o["people"]}
+    assert (people["Активный И"]["activity"], people["Активный И"]["minutes_since"], people["Активный И"]["last_today"]) == ("active", 10, "13:50")
+    assert (people["Пауза И"]["activity"], people["Пауза И"]["minutes_since"]) == ("pause", 60)
+    assert (people["Молчит И"]["activity"], people["Молчит И"]["minutes_since"]) == ("silent", 150)
+    assert (roster["totals"]["active"], roster["totals"]["pause"], roster["totals"]["silent"]) == (1, 1, 1)
+    okrug = next(o for o in roster["okrugs"] if o["okrug"] == TIK_TO_OKRUG[BAL])
+    assert [p["name"] for p in okrug["people"]] == ["Молчит И", "Пауза И", "Активный И"] and okrug["silent"] == 1
+    late = build_roster(values, settings, datetime(2026, 9, 19, 20, 30, tzinfo=settings.zone))
+    assert {p["activity"] for o in late["okrugs"] for p in o["people"]} == {"done"}
