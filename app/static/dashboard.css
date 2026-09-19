@@ -42,4 +42,10 @@ details.method{margin:14px 0 6px;font-size:12px;color:var(--muted)}details.metho
 .roster-summary{grid-template-columns:repeat(6,1fr)}.roster-pause{background:#fbf1d9;color:#8a6a1d}@media(max-width:1100px){.roster-summary{grid-template-columns:repeat(3,1fr)}}@media(max-width:650px){.roster-summary{grid-template-columns:1fr 1fr}}
 .party-panel{display:flex;flex-direction:column}.party-panel #tab-answers{flex:1;display:flex;flex-direction:column}.party-panel #party-chart{flex:1;display:flex}
 .columns.fill{flex:1;width:100%;height:auto;min-height:440px;gap:6px;overflow-x:visible}.columns.fill .column{min-width:0}.columns.fill .column-label{max-width:100%;font-size:10px}.columns.fill .column-bar{max-width:46px}
-.column-logo{flex-shrink:0;display:block;width:100%;height:40px;object-fit:contain;margin-bottom:auto}span.column-logo{visibility:hidden}
+.column-logo{flex-shrink:0;width:44px;height:44px;border-radius:50%;background:#fff;border:1px solid var(--line);box-shadow:0 2px 8px rgba(38,58,43,.08);display:flex;align-items:center;justify-content:center;overflow:hidden;margin:0 auto auto}.column-logo img{display:block;width:74%;height:74%;object-fit:contain}.column-logo.empty{visibility:hidden}
+
+.metric[data-kind]{cursor:pointer;transition:transform .15s,box-shadow .15s}.metric[data-kind]:hover{transform:translateY(-2px);box-shadow:0 22px 50px rgba(38,58,43,.12)}.metric[data-kind]:focus-visible{outline:2px solid var(--green);outline-offset:2px}.metric.selected{outline:2px solid var(--deep);outline-offset:2px}
+.metric .delta{display:block;margin-top:8px;font-style:normal;font-size:11px;font-weight:700;color:var(--muted)}.metric.accent .delta{color:#cbd7ce}
+.metric.tone-red{background:#fbe6e1;border-color:#ebc0b6}.metric.tone-red strong{color:#8e3b2c}
+.metric.tone-yellow{background:#fbf1cc;border-color:#ebd98d}.metric.tone-yellow strong{color:#7a5f0f}
+.metric.tone-sage{background:#e4eedd;border-color:#cbdbc2}.metric.tone-blue{background:#e5edf3;border-color:#c8d8e4}.metric.tone-sand{background:#f1ebdd;border-color:#ddd2ba}

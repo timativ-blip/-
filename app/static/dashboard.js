@@ -63,7 +63,7 @@ function renderColumns(target, items, {compact = false, kind = '', keyOf = item 
   const max = Math.max(1, ...items.map(x => x.count));
   let maxHeight = compact ? 90 : 150;
   const box = $(target);
-  const logo = item => logos && logos[item.label] ? `<img class="column-logo" src="/static/logos/${logos[item.label]}.png" alt="" width="44" height="40" loading="lazy">` : logos ? '<span class="column-logo"></span>' : '';
+  const logo = item => logos && logos[item.label] ? `<span class="column-logo"><img src="/static/logos/${logos[item.label]}.png" alt="" width="34" height="34" loading="lazy"></span>` : logos ? '<span class="column-logo empty"></span>' : '';
   box.innerHTML = `<div class="columns${compact ? ' compact' : ''}${fill ? ' fill' : ''}">${items.map(item => `<div class="column"${kind ? ` data-kind="${kind}" data-key="${escapeHTML(keyOf(item))}" role="button" tabindex="0"` : ''}>${logo(item)}<div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="column-bar"></div><div class="column-label" title="${escapeHTML(item.title || item.label)}">${escapeHTML(item.label)}</div></div>`).join('')}</div>`;
   // CSP (style-src 'self', no unsafe-inline) drops style="" written via innerHTML;
   // assigning through the DOM style API below is unaffected and actually renders the bar height.
@@ -198,6 +198,7 @@ function renderDetailTable(table) {
 function renderDetail(data) {
   const drawer = $('#detail-drawer'), scroll = drawer.scrollTop;
   $('#drawer-role').textContent = (data.role || 'Анализ графы').toUpperCase();
+  document.querySelector('#detail-drawer .focus-select').hidden = data.kind === 'kpi';
   $('#drawer-title').textContent = data.title;
   $('#drawer-sub').textContent = `${data.subtitle} · пересчитывается вместе с данными`;
   const metrics = data.metrics.map(m => `<div class="detail-metric"><span>${escapeHTML(m.label)}</span><strong>${escapeHTML(m.value)}</strong></div>`).join('');
@@ -351,16 +352,24 @@ function renderMap(payload) {
   mapPayload = payload;
   if (mapGeo === null) void initMap(); else paintMap();
 }
-function renderSummary(summary) {
+function renderSummary(summary, compare) {
   const cards = [
-    ['Всего анкет',summary.total,'За выбранный период','accent'],
-    ['Отказались',summary.refusals,summary.total ? `${Math.round(summary.refusals*100/summary.total)}% от анкет` : 'Нет данных','warm'],
-    ['Испортили бюллетень',summary.spoiled,'Отдельный вариант ответа',''],
-    ['Интервьюеров',summary.interviewers,'Уникальных людей',''],
-    ['УИК с данными',summary.uiks,'Охвачено участков',''],
-    ['ТИК с данными',summary.tiks,'Охвачено территорий',''],
+    ['total','Всего анкет',summary.total,'За выбранный период','accent'],
+    ['refusals','Отказались',summary.refusals,summary.total ? `${Math.round(summary.refusals*100/summary.total)}% от анкет` : 'Нет данных','tone-red'],
+    ['spoiled','Испортили бюллетень',summary.spoiled,'Отдельный вариант ответа','tone-yellow'],
+    ['interviewers','Интервьюеров',summary.interviewers,'Уникальных людей','tone-sage'],
+    ['uiks','УИК с данными',summary.uiks,'Охвачено участков','tone-blue'],
+    ['tiks','ТИК с данными',summary.tiks,'Охвачено территорий','tone-sand'],
   ];
-  $('#summary').innerHTML = cards.map(([label,value,note,kind]) => `<article class="metric ${kind}"><span>${escapeHTML(label)}</span><strong>${number(value)}</strong><small>${escapeHTML(note)}</small></article>`).join('');
+  const deltaLine = key => {
+    const item = compare && compare.values[key];
+    if (!compare) return '';
+    if (!compare.has_previous || !item || item.before === null) return 'вчера данных нет';
+    const diff = item.today - item.before, arrow = diff > 0 ? '▲' : diff < 0 ? '▼' : '=';
+    const pct = item.change === null ? '' : ` ${Math.abs(item.change)}%`;
+    return `${arrow}${pct} к вчера${compare.cutoff ? ' ' + compare.cutoff : ''}`;
+  };
+  $('#summary').innerHTML = cards.map(([key,label,value,note,tone]) => `<article class="metric ${tone}" data-kind="kpi" data-key="${key}" role="button" tabindex="0" title="Сравнить с прошлым днём"><span>${escapeHTML(label)}</span><strong>${number(value)}</strong><small>${escapeHTML(note)}</small><em class="delta">${escapeHTML(deltaLine(key))}</em></article>`).join('');
 }
 function renderHours(items) {
   const max = Math.max(1, ...items.map(x => x.count));
@@ -483,7 +492,7 @@ function renderFilters(data) {
   $('#precinct').disabled = !filters.tik;
 }
 function render(data) {
-  renderFilters(data); renderSummary(data.summary); lastParties = data.parties; renderPartyChart();
+  renderFilters(data); renderSummary(data.summary, data.compare); lastParties = data.parties; renderPartyChart();
   renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender',colors:GENDER_COLORS}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
   renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderMap(data.map); renderForecast(data.forecast, data.summary);
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);

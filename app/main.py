@@ -775,7 +775,7 @@ SERVICE_ANSWERS = ("Испортил бюллетень", "Отказался о
 DETAIL_MIN_N = 30
 TIME_BLOCKS = (("до 12:00", 0, 12), ("12:00–16:00", 12, 16), ("с 16:00", 16, 24))
 GENDER_LABELS = ("Мужской", "Женский")
-DETAIL_KINDS = ("party", "gender", "age", "okrug", "hour")
+DETAIL_KINDS = ("party", "gender", "age", "okrug", "hour", "kpi")
 DEFAULT_FOCUS = "Новые люди"
 Z95 = 1.96
 
@@ -1416,6 +1416,8 @@ def group_analysis(scope, kind, key, focus, settings, forecast):
 
 def dashboard_detail(values, settings, kind, key, focus=DEFAULT_FOCUS, requested_day=None, requested_okrug=None,
                      requested_tik=None, requested_precinct=None):
+    if kind == "kpi":
+        return kpi_detail(values, settings, key, requested_day, requested_okrug, requested_tik, requested_precinct)
     rows = parse_sheet_rows(values)
     _dates, _day, _day_rows, scope = scope_rows(rows, settings, requested_day, requested_okrug,
                                                  requested_tik, requested_precinct)
@@ -1436,6 +1438,159 @@ def dashboard_detail(values, settings, kind, key, focus=DEFAULT_FOCUS, requested
         role = "Группа"
     return {"kind": kind, "key": key, "focus": focus, "title": title, "role": role,
             "subtitle": f"В выбранной области: {_fmt_int(len(scope))} анкет", **body}
+
+
+KPI_KEYS = ("total", "refusals", "spoiled", "interviewers", "uiks", "tiks")
+KPI_TITLES = {"total": "Всего анкет", "refusals": "Отказались", "spoiled": "Испортили бюллетень", "interviewers": "Интервьюеры",
+              "uiks": "УИК с данными", "tiks": "ТИК с данными"}
+KPI_UNITS = {"total": "анкет", "refusals": "отказов", "spoiled": "испорченных бюллетеней", "interviewers": "интервьюеров",
+             "uiks": "УИК с данными", "tiks": "ТИК с данными"}
+KPI_FIRST_HOUR = 8
+
+
+def _kpi_value(key, rows):
+    if key == "total":
+        return len(rows)
+    if key == "refusals":
+        return sum(r["answer"] == "Отказался отвечать" for r in rows)
+    if key == "spoiled":
+        return sum(r["answer"] == "Испортил бюллетень" for r in rows)
+    if key == "interviewers":
+        return len({person_id(r) for r in rows})
+    if key == "uiks":
+        return len({r["precinct_id"] for r in rows})
+    return len({r["tik"] for r in rows if r["tik"]})
+
+
+def _local_time(row, settings):
+    moment = parse_moment(row["created_at"])
+    return moment.astimezone(settings.zone) if moment else None
+
+
+def _minutes(row, settings):
+    moment = _local_time(row, settings)
+    return moment.hour * 60 + moment.minute if moment else None
+
+
+def kpi_windows(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct):
+    """The selected day against the calendar day before it, cut at the same clock time while the selected day is still running."""
+    dates, selected, _day_rows, _scope = scope_rows(rows, settings, requested_day, None, None, None)
+    day = selected if selected != ALL_DAYS else (dates[0] if dates else None)
+    if not day or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        return None
+    previous = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+
+    def visible(row):
+        return ((not requested_okrug or TIK_TO_OKRUG.get(row["tik"]) == requested_okrug) and (not requested_tik or row["tik"] == requested_tik)
+                and (not requested_precinct or row["precinct_id"] == requested_precinct))
+    current = [r for r in rows if r["day"] == day and visible(r)]
+    before = [r for r in rows if r["day"] == previous and visible(r)]
+    cutoff = None
+    if dates and day == dates[0]:
+        stamps = [m for m in (_minutes(r, settings) for r in rows if r["day"] == day) if m is not None]
+        cutoff = max(stamps) if stamps else None
+    same_time = [r for r in before if cutoff is None or (_minutes(r, settings) is not None and _minutes(r, settings) <= cutoff)]
+    return {"day": day, "previous": previous, "current": current, "before": before, "same_time": same_time, "cutoff": cutoff,
+            "has_previous": bool(before)}
+
+
+def _clock(minutes):
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _change(today, before):
+    if before in (None, 0):
+        return None
+    return round((today - before) * 100 / before, 1)
+
+
+def kpi_compare(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct):
+    """Small per-card comparison for the summary tiles."""
+    windows = kpi_windows(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct)
+    if not windows:
+        return None
+    result = {"day": windows["day"], "previous": windows["previous"], "cutoff": _clock(windows["cutoff"]) if windows["cutoff"] is not None else None,
+              "has_previous": windows["has_previous"], "values": {}}
+    for key in KPI_KEYS:
+        today = _kpi_value(key, windows["current"])
+        before = _kpi_value(key, windows["same_time"]) if windows["has_previous"] else None
+        result["values"][key] = {"today": today, "before": before, "change": _change(today, before)}
+    return result
+
+
+def _signed(value):
+    return f"{value:+,}".replace(",", " ")
+
+
+def _short_date(iso):
+    return f"{iso[8:10]}.{iso[5:7]}"
+
+
+def kpi_detail(values, settings, key, requested_day=None, requested_okrug=None, requested_tik=None, requested_precinct=None):
+    rows = parse_sheet_rows(values)
+    title, unit = KPI_TITLES[key], KPI_UNITS[key]
+    windows = kpi_windows(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct)
+    if not windows:
+        return {"kind": "kpi", "key": key, "title": title, "role": "Сравнение с прошлым днём", "subtitle": "Данных пока нет",
+                "headline": {"level": "info", "text": "Данных пока нет, сравнивать не с чем."}, "metrics": [], "sections": []}
+    day, previous, cutoff = windows["day"], windows["previous"], windows["cutoff"]
+    when = f"к {_clock(cutoff)}" if cutoff is not None else "за день"
+    today = _kpi_value(key, windows["current"])
+    subtitle = f"{_short_date(day)} против {_short_date(previous)}" + (f", {when}" if cutoff is not None else "")
+    if not windows["has_previous"]:
+        return {"kind": "kpi", "key": key, "title": title, "role": "Сравнение с прошлым днём", "subtitle": subtitle,
+                "headline": {"level": "info", "text": f"За {_short_date(previous)} данных в выбранной области нет: сейчас {_fmt_int(today)} {unit}, сравнивать не с чем."},
+                "metrics": [{"label": f"Сегодня {when}", "value": _fmt_int(today)}], "sections": []}
+    before = _kpi_value(key, windows["same_time"])
+    full_before = _kpi_value(key, windows["before"])
+    change = _change(today, before)
+    delta = today - before
+    word = "больше" if delta > 0 else "меньше" if delta < 0 else "столько же"
+    text = (f"{when.capitalize()} {_fmt_int(today)} {unit} против {_fmt_int(before)} вчера" if cutoff is not None
+            else f"За {_short_date(day)} {_fmt_int(today)} {unit} против {_fmt_int(before)} за {_short_date(previous)}")
+    if change is not None and delta:
+        text += f": на {abs(change):g}% {word}."
+    else:
+        text += "."
+    level = "notable" if change is not None and abs(change) >= 25 else "info"
+    metrics = [{"label": f"Сегодня {when}", "value": _fmt_int(today)}, {"label": f"Вчера {when}" if cutoff is not None else "Вчера", "value": _fmt_int(before)},
+               {"label": "Изменение", "value": f"{_signed(delta)}" + (f" ({change:+g}%)" if change is not None else "")},
+               {"label": "Вчера за весь день", "value": _fmt_int(full_before)}]
+    if key in ("refusals", "spoiled"):
+        now_rows, was_rows = len(windows["current"]), len(windows["same_time"])
+        metrics += [{"label": "Доля сегодня", "value": _pct(today * 100 / now_rows) if now_rows else "—"},
+                    {"label": "Доля вчера", "value": _pct(before * 100 / was_rows) if was_rows else "—"}]
+
+    last_hour = cutoff // 60 if cutoff is not None else 20
+    hour_rows = []
+    for hour in range(KPI_FIRST_HOUR, max(KPI_FIRST_HOUR, last_hour) + 1):
+        now_v = _kpi_value(key, [r for r in windows["current"] if (_minutes(r, settings) or 0) // 60 <= hour])
+        was_v = _kpi_value(key, [r for r in windows["before"] if (_minutes(r, settings) or 0) // 60 <= hour])
+        diff = now_v - was_v
+        hour_rows.append([_cell(f"до {hour + 1:02d}:00"), _cell(_fmt_int(now_v), bar=now_v), _cell(_fmt_int(was_v), bar=was_v),
+                          _cell(_signed(diff), "up" if diff > 0 else "down" if diff < 0 else "")])
+    okrug_rows = []
+    for okrug in sorted(OKRUGS):
+        now_v = _kpi_value(key, [r for r in windows["current"] if TIK_TO_OKRUG.get(r["tik"]) == okrug])
+        was_v = _kpi_value(key, [r for r in windows["same_time"] if TIK_TO_OKRUG.get(r["tik"]) == okrug])
+        okrug_rows.append((okrug, now_v, was_v))
+    okrug_rows.sort(key=lambda item: (item[1] - item[2], item[0]))
+    findings = []
+    gains = [item for item in reversed(okrug_rows) if item[1] > item[2]][:3]
+    drops = [item for item in okrug_rows if item[1] < item[2]][:3]
+    if gains:
+        findings.append(_find("info", "Больше вчерашнего: " + ", ".join(f"округ {o} ({_signed(n - w)})" for o, n, w in gains) + "."))
+    if drops:
+        findings.append(_find("notable", "Меньше вчерашнего: " + ", ".join(f"округ {o} ({_signed(n - w)})" for o, n, w in drops) + "."))
+    tables = [_table("Нарастающим итогом по часам", ["Час", "Сегодня", "Вчера", "Разница"], hour_rows,
+                     "Значения на конец часа. Если день ещё идёт, показаны часы до последней анкеты."),
+              _table("По округам", ["Округ", "Сегодня", "Вчера", "Разница"],
+                     [[_cell(f"Округ {o}"), _cell(_fmt_int(n)), _cell(_fmt_int(w)), _cell(_signed(n - w), "up" if n > w else "down" if n < w else "")]
+                      for o, n, w in sorted(okrug_rows, key=lambda item: item[0])],
+                     "Вчерашние значения — к тому же времени суток." if cutoff is not None else "")]
+    return {"kind": "kpi", "key": key, "title": title, "role": "Сравнение с прошлым днём", "subtitle": subtitle,
+            "headline": {"level": level, "text": text}, "metrics": metrics,
+            "sections": [_section("Динамика", findings, tables[:1]), _section("Территории", [], tables[1:])]}
 
 
 ROSTER_ACTIVE_MINUTES = 20  # last anketa no older than this: working
@@ -1778,6 +1933,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
         "hours": [{"hour": f"{hour:02d}:00", "count": hours[hour]} for hour in range(7, 24)],
         "new_people_by_okrug": new_people_by_okrug, "new_people_by_age": new_people_by_age, "party_okrug": party_okrug, "party_age": party_age,
         "swing": build_swing(okrug_rows), "map": build_map_data(day_rows),
+        "compare": kpi_compare(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct),
         "forecast": forecast_shares(rows, territory_weights(settings)),
         "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
@@ -2046,7 +2202,7 @@ def create_app(settings=None):
                               okrug: str | None = None, tik: str | None = None, precinct: str | None = None):
         check_scope(day, okrug, tik, precinct)
         valid = {"party": {label for pid, label in PARTIES if pid != "2"}, "gender": set(GENDER_LABELS),
-                 "age": set(AGES), "okrug": set(OKRUGS), "hour": {f"{hour:02d}" for hour in range(24)}}
+                 "age": set(AGES), "okrug": set(OKRUGS), "hour": {f"{hour:02d}" for hour in range(24)}, "kpi": set(KPI_KEYS)}
         if kind not in DETAIL_KINDS or key not in valid[kind]:
             raise HTTPException(422, "Неизвестная графа")
         if focus not in valid["party"] - set(SERVICE_ANSWERS):

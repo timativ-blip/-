@@ -1081,3 +1081,51 @@ def test_every_party_logo_referenced_by_the_dashboard_exists():
     files = re.findall(r":\s*'([a-z-]+)'", block)
     assert len(files) == 11 and all((static / "logos" / f"{name}.png").stat().st_size > 1000 for name in files)
     assert sum(f.stat().st_size for f in (static / "logos").iterdir()) < 500_000
+
+
+def kpi_values(settings, spec):
+    """spec: (day, HH:MM, tik, answer, surname)"""
+    rows = []
+    for i, (day, clock, tik, answer, surname) in enumerate(spec):
+        precinct = next(p for p in settings.precincts if p["tik"] == tik)
+        stamp = f"{day}T{clock}:00+03:00"
+        rows.append([f"k{i}", stamp, day, surname, "И", precinct["id"], precinct["label"], answer, "Мужской", "25–34", f"s{day}{surname}", stamp, tik])
+    return rows
+
+
+def test_kpi_compare_uses_the_same_clock_time_for_the_running_day(settings):
+    spec = ([("2026-09-18", "09:00", BAL, "Единая Россия", "А")] * 4 + [("2026-09-18", "15:00", BAL, "Отказался отвечать", "Б")] * 6
+            + [("2026-09-19", "09:30", BAL, "Единая Россия", "А")] * 3 + [("2026-09-19", "10:00", BAL, "Отказался отвечать", "В")] * 2)
+    compare = dashboard_snapshot(kpi_values(settings, spec), settings)["compare"]
+    assert compare["day"] == "2026-09-19" and compare["previous"] == "2026-09-18" and compare["cutoff"] == "10:00"
+    total = compare["values"]["total"]
+    assert (total["today"], total["before"], total["change"]) == (5, 4, 25.0)  # yesterday's afternoon rows are not counted
+    assert compare["values"]["refusals"]["before"] == 0 and compare["values"]["refusals"]["change"] is None
+    assert compare["values"]["interviewers"] == {"today": 2, "before": 1, "change": 100.0}
+    finished = dashboard_snapshot(kpi_values(settings, spec), settings, requested_day="2026-09-18")["compare"]
+    assert finished["has_previous"] is False and finished["values"]["total"]["before"] is None
+
+
+def test_kpi_detail_explains_the_change(settings):
+    spec = ([("2026-09-18", "09:00", BAL, "Единая Россия", "А")] * 10 + [("2026-09-19", "09:30", BAL, "Единая Россия", "А")] * 5)
+    values = kpi_values(settings, spec)
+    payload = dashboard_detail(values, settings, "kpi", "total")
+    assert payload["role"] == "Сравнение с прошлым днём" and "на 50% меньше" in payload["headline"]["text"]
+    assert [m["value"] for m in payload["metrics"][:2]] == ["5", "10"] and payload["metrics"][2]["value"] == "-5 (-50%)"
+    hours = payload["sections"][0]["tables"][0]["rows"]
+    assert hours[0][0]["t"] == "до 09:00" and hours[1][3]["t"] == "-5"  # 09:30 today against 09:00 yesterday: 5 vs 10 by the end of hour 9
+    okrug = next(r for r in payload["sections"][1]["tables"][0]["rows"] if r[0]["t"] == f"Округ {TIK_TO_OKRUG[BAL]}")
+    assert okrug[1]["t"] == "5" and okrug[2]["t"] == "10"
+    assert dashboard_detail(values, settings, "kpi", "uiks", requested_day="2026-09-18")["headline"]["text"].startswith("За 17.09 данных")
+    assert "сравнивать не с чем" in dashboard_detail([], settings, "kpi", "total")["headline"]["text"]
+
+
+def test_kpi_detail_endpoint_validates_key(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    monkeypatch.setattr("app.main.read_sheet", lambda _: [])
+    monkeypatch.setattr("app.main.read_anomaly_statuses", lambda _s, session=None: {})
+    with TestClient(create_app(settings)) as client:
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        assert client.get("/api/dashboard/detail", params={"kind": "kpi", "key": "total"}).status_code == 200
+        assert client.get("/api/dashboard/detail", params={"kind": "kpi", "key": "nonsense"}).status_code == 422
