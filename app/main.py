@@ -92,6 +92,7 @@ class Settings:
         self.sheet = os.getenv("GOOGLE_SHEET_NAME", "Анкеты")
         self.anomaly_sheet = os.getenv("GOOGLE_ANOMALY_SHEET_NAME", "Аномалии")
         self.dashboard_code = os.getenv("DASHBOARD_CODE", "")
+        self.roster_code = os.getenv("ROSTER_CODE", "")
         self.sms_url = os.getenv("SMS_GATEWAY_URL", "")
         self.sms_token = os.getenv("SMS_GATEWAY_TOKEN", "")
         self.sms_number = os.getenv("SMS_REQUEST_NUMBER", "")
@@ -1436,6 +1437,73 @@ def dashboard_detail(values, settings, kind, key, focus=DEFAULT_FOCUS, requested
             "subtitle": f"В выбранной области: {_fmt_int(len(scope))} анкет", **body}
 
 
+ROSTER_SALT = b"exit-poll-roster-v1"
+# PBKDF2 hash of the roster password, so the password itself is not stored in Git; ROSTER_CODE in the environment overrides it.
+ROSTER_HASH = "afa8cfd8ad0b9e85d4d0e2965b913345eac477cb103dc7e4457011675d0dd142"
+
+
+def roster_code_ok(candidate, override=""):
+    if override:
+        return hmac.compare_digest(candidate.encode(), override.encode())
+    digest = hashlib.pbkdf2_hmac("sha256", candidate.encode(), ROSTER_SALT, 200_000).hex()
+    return hmac.compare_digest(digest, ROSTER_HASH)
+
+
+def person_key(surname, name):
+    """Order- and case-insensitive identity, so 'Шадура Матвей' and 'Матвей Шадура' are one person."""
+    tokens = f"{surname} {name}".lower().replace("ё", "е").split()
+    return " ".join(sorted(tokens))
+
+
+def build_roster(values, settings, now=None):
+    """Who worked yesterday and today, who has not appeared today yet, split by okrug."""
+    moment = now or datetime.now(settings.zone)
+    today = moment.date().isoformat()
+    yesterday = (moment.date() - timedelta(days=1)).isoformat()
+    people = {}
+    for row in parse_sheet_rows(values):
+        if row["day"] not in (today, yesterday) or not (row["surname"] or row["name"]):
+            continue
+        entry = people.setdefault(person_key(row["surname"], row["name"]), {"names": Counter(), "days": {today: Counter(), yesterday: Counter()},
+                                                                            "tiks": {today: Counter(), yesterday: Counter()}, "last": {}, "first": {}})
+        entry["names"][f'{row["surname"]} {row["name"]}'.strip()] += 1
+        entry["days"][row["day"]][row["precinct"]] += 1
+        entry["tiks"][row["day"]][row["tik"]] += 1
+        stamp = parse_moment(row["created_at"])
+        if stamp:
+            stamp = stamp.astimezone(settings.zone)
+            entry["last"][row["day"]] = max(stamp, entry["last"].get(row["day"], stamp))
+            entry["first"][row["day"]] = min(stamp, entry["first"].get(row["day"], stamp))
+    today_uik = defaultdict(list)
+    for entry in people.values():
+        for precinct in entry["days"][today]:
+            today_uik[precinct].append(entry["names"].most_common(1)[0][0])
+    okrugs = {okrug: {"okrug": okrug, "people": []} for okrug in sorted(OKRUGS)}
+    for entry in people.values():
+        was, is_now = sum(entry["days"][yesterday].values()), sum(entry["days"][today].values())
+        tik = (entry["tiks"][yesterday] or entry["tiks"][today]).most_common(1)[0][0]
+        if tik not in TIK_TO_OKRUG:
+            continue
+        name = entry["names"].most_common(1)[0][0]
+        precinct = (entry["days"][yesterday] or entry["days"][today]).most_common(1)[0][0]
+        status = "both" if was and is_now else "absent" if was else "new"
+        replaced_by = [other for other in today_uik.get(precinct, []) if other != name] if status == "absent" else []
+        okrugs[TIK_TO_OKRUG[tik]]["people"].append({
+            "name": name, "tik": tik, "precinct": precinct, "status": status, "yesterday": was, "today": is_now,
+            "last_yesterday": entry["last"][yesterday].strftime("%H:%M") if yesterday in entry["last"] else None,
+            "first_today": entry["first"][today].strftime("%H:%M") if today in entry["first"] else None,
+            "replaced_by": replaced_by})
+    order = {"absent": 0, "new": 1, "both": 2}
+    result = []
+    for item in okrugs.values():
+        item["people"].sort(key=lambda p: (order[p["status"]], -p["yesterday"], p["name"]))
+        counts = Counter(p["status"] for p in item["people"])
+        result.append({"okrug": item["okrug"], "yesterday": counts["absent"] + counts["both"], "today": counts["new"] + counts["both"],
+                       "absent": counts["absent"], "new": counts["new"], "both": counts["both"], "people": item["people"]})
+    totals = {key: sum(item[key] for item in result) for key in ("yesterday", "today", "absent", "new", "both")}
+    return {"today": today, "yesterday": yesterday, "generated_at": moment.isoformat(), "totals": totals, "okrugs": result}
+
+
 def build_map_data(day_rows):
     """Per-TIK answer counts for the choropleth (day filter only, like the other territory blocks)."""
     counts = defaultdict(Counter)
@@ -1863,6 +1931,43 @@ def create_app(settings=None):
             raise HTTPException(422, "ТИК не относится к выбранному округу")
         if precinct and precinct not in {p["id"] for p in settings.precincts}:
             raise HTTPException(422, "Неизвестный УИК")
+
+    def roster_authorized(request: Request):
+        token = request.cookies.get("exit_poll_roster_session", "")
+        try:
+            expiry, signature = token.split(".")
+            if int(expiry) >= time.time() and hmac.compare_digest(signature, signed("roster:" + expiry)):
+                return
+        except (ValueError, TypeError):
+            pass
+        raise HTTPException(401, "Введите пароль сводки")
+
+    @app.post("/api/dashboard/roster/login", dependencies=[Depends(dashboard_authorized)])
+    def roster_login(body: DashboardLogin, request: Request, response: Response):
+        now = time.time()
+        key = "roster:" + (request.client.host if request.client else "unknown")
+        count, since = failures.get(key, (0, now))
+        if now - since >= 300:
+            count, since = 0, now
+        if count >= 10:
+            raise HTTPException(429, "Повторите через 5 минут")
+        if not roster_code_ok(body.code, settings.roster_code):
+            failures[key] = (count + 1, since)
+            raise HTTPException(401, "Неверный пароль")
+        failures.pop(key, None)
+        expiry = str(int(now + 12 * 3600))
+        response.set_cookie("exit_poll_roster_session", expiry + "." + signed("roster:" + expiry),
+                            httponly=True, secure=settings.production, samesite="strict", max_age=12 * 3600)
+        return {"ok": True}
+
+    @app.get("/api/dashboard/roster", dependencies=[Depends(dashboard_authorized), Depends(roster_authorized)])
+    def roster_data():
+        try:
+            values = cached_sheet_values()
+        except Exception as exc:
+            LOG.warning("Dashboard Sheets read failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "Не удалось прочитать Google Таблицу")
+        return build_roster(values, settings)
 
     @app.get("/api/dashboard/detail", dependencies=[Depends(dashboard_authorized)])
     def dashboard_detail_view(kind: str, key: str, focus: str = DEFAULT_FOCUS, day: str | None = None,

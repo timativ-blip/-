@@ -890,3 +890,66 @@ def test_map_payload_counts_match_day_rows(settings):
     assert sum(t["n"] for t in payload["tiks"]) == 55
     empty = dashboard_snapshot([], settings)["map"]
     assert all(t["n"] == 0 and t["answers"] == {} for t in empty["tiks"])
+
+
+def roster_values(settings, spec):
+    """spec: (day, tik, surname, name, count)"""
+    rows = []
+    for day, tik, surname, name, count in spec:
+        precinct = next(p for p in settings.precincts if p["tik"] == tik)
+        for i in range(count):
+            rows.append([f"{day}-{surname}-{name}-{i}", f"{day}T09:{i % 60:02d}:00+03:00", day, surname, name, precinct["id"], precinct["label"],
+                         "Единая Россия", "Мужской", "25–34", f"{day}-{surname}", f"{day}T09:{i % 60:02d}:00+03:00", tik])
+    return rows
+
+
+def test_roster_lists_interviewers_missing_today_by_okrug(settings):
+    from app.main import build_roster
+    now = datetime(2026, 9, 19, 11, 0, tzinfo=settings.zone)
+    values = roster_values(settings, [("2026-09-18", BAL, "Иванова", "Анна", 5), ("2026-09-19", BAL, "Иванова", "Анна", 2),
+                                      ("2026-09-18", BAL, "Петров", "Олег", 4), ("2026-09-18", DMI, "Шадура", "Матвей", 3),
+                                      ("2026-09-19", DMI, "Матвей", "Шадура", 1), ("2026-09-19", BAL, "Новиков", "Иван", 1),
+                                      ("2026-09-17", BAL, "Старый", "Давно", 9)])
+    roster = build_roster(values, settings, now)
+    assert roster["today"] == "2026-09-19" and roster["yesterday"] == "2026-09-18"
+    assert roster["totals"] == {"yesterday": 3, "today": 3, "absent": 1, "new": 1, "both": 2}
+    people = {p["name"]: p for okrug in roster["okrugs"] for p in okrug["people"]}
+    assert people["Петров Олег"]["status"] == "absent" and people["Петров Олег"]["yesterday"] == 4
+    assert people["Иванова Анна"]["status"] == "both" and people["Новиков Иван"]["status"] == "new"
+    assert people["Шадура Матвей"]["status"] == "both" and "Старый Давно" not in people
+    okrug = next(o for o in roster["okrugs"] if o["okrug"] == TIK_TO_OKRUG[BAL])
+    assert okrug["absent"] == 1 and okrug["people"][0]["name"] == "Петров Олег"
+
+
+def test_roster_flags_replacement_on_same_precinct(settings):
+    from app.main import build_roster
+    now = datetime(2026, 9, 19, 11, 0, tzinfo=settings.zone)
+    values = roster_values(settings, [("2026-09-18", BAL, "Петров", "Олег", 4), ("2026-09-19", BAL, "Замена", "Ольга", 1)])
+    person = next(p for o in build_roster(values, settings, now)["okrugs"] for p in o["people"] if p["name"] == "Петров Олег")
+    assert person["replaced_by"] == ["Замена Ольга"]
+
+
+def test_roster_needs_dashboard_and_roster_passwords(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    monkeypatch.setattr("app.main.read_sheet", lambda _: [])
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/dashboard/roster").status_code == 401
+        assert client.post("/api/dashboard/roster/login", json={"code": "exitpoll"}).status_code == 401  # no coordinator session yet
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        assert client.get("/api/dashboard/roster").status_code == 401  # coordinator code alone is not enough
+        assert client.post("/api/dashboard/roster/login", json={"code": "wrong"}).status_code == 401
+        assert client.post("/api/dashboard/roster/login", json={"code": "coordinator-secret"}).status_code == 401
+        assert client.post("/api/dashboard/roster/login", json={"code": "exitpoll"}).status_code == 200
+        response = client.get("/api/dashboard/roster")
+        assert response.status_code == 200 and response.json()["totals"]["absent"] == 0
+    with TestClient(create_app(settings)) as other:  # a fresh browser has neither session
+        assert other.get("/api/dashboard/roster").status_code == 401
+
+
+def test_roster_code_env_override_and_no_plaintext_in_source(settings):
+    from pathlib import Path
+    from app.main import roster_code_ok
+    assert roster_code_ok("exitpoll") and not roster_code_ok("exitpoll ")
+    assert roster_code_ok("другой", override="другой") and not roster_code_ok("exitpoll", override="другой")
+    assert "exitpoll" not in (Path(__file__).resolve().parent.parent / "app" / "main.py").read_text(encoding="utf-8")

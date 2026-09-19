@@ -110,6 +110,16 @@
       <section class="panel table-panel"><header><div><p class="kicker">КОНТРОЛЬ КАЧЕСТВА</p><h2>Аномалии интервьюеров</h2><p id="anomaly-summary" class="subtle"></p></div><label class="switch"><input id="anomaly-show-closed" type="checkbox"><span class="switch-track"></span><span>Показывать закрытые</span></label></header><div id="anomaly-notice" class="alert" hidden>Не удалось прочитать статусы из вкладки «Аномалии»: закрытые аномалии могут временно показываться как открытые.</div><div id="anomalies" class="anomalies"></div></section>
 
       <section class="panel"><header><div><p class="kicker">ПОТОК</p><h2>Последние анкеты</h2></div></header><div id="recent" class="recent"></div></section>
+
+      <section class="panel" id="roster-panel"><header><div><p class="kicker">КОМАНДА</p><h2>Сводка интервьюеров</h2><p id="roster-sub" class="subtle">Раздел закрыт отдельным паролем</p></div><button id="roster-lock" class="ghost-button" type="button" hidden>Закрыть раздел</button></header>
+        <form id="roster-login" class="roster-login"><label for="roster-code">Пароль</label><input id="roster-code" type="password" autocomplete="off" required><button class="primary-small" type="submit">Открыть</button><p id="roster-error" class="error" role="alert"></p></form>
+        <div id="roster-body" hidden>
+          <div id="roster-summary" class="summary roster-summary"></div>
+          <div class="roster-filter"><label class="switch"><input id="roster-absent-only" type="checkbox" checked><span class="switch-track"></span><span>Только не вышедшие сегодня</span></label></div>
+          <div id="roster-okrugs"></div>
+          <p class="panel-note table-note">Сравнение по имени и фамилии (порядок слов и регистр не важны) по данным Google Таблицы: «вчера» и «сегодня» — календарные даты в часовом поясе Москвы. «Нет сегодня» — есть анкеты за вчера, за сегодня пока нет; утром многие ещё не начали работу. «Замена» — на том же УИК сегодня работает другой интервьюер. Обновляется вместе с дашбордом.</p>
+        </div>
+      </section>
     </main>
 
     <aside id="detail-drawer" class="drawer" hidden aria-label="Анализ графы">

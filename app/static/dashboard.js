@@ -468,6 +468,39 @@ function render(data) {
   focusOptions(data.parties); markActiveBar(); void refreshDetail();
   $('#updated-at').textContent = 'Обновлено в ' + new Date(data.generated_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
+let rosterOpen = false;
+const ROSTER_STATUS = {absent: ['Нет сегодня', 'roster-absent'], new: ['Новый сегодня', 'roster-new'], both: ['Работает', 'roster-both']};
+function renderRoster(data) {
+  const totals = data.totals, absentOnly = $('#roster-absent-only').checked;
+  $('#roster-sub').textContent = `Вчера ${dateLabel(data.yesterday)} · сегодня ${dateLabel(data.today)}`;
+  $('#roster-summary').innerHTML = [['Вчера работали', totals.yesterday, ''], ['Сегодня вышли', totals.today, ''], ['Нет сегодня', totals.absent, 'warn'], ['Новые сегодня', totals.new, '']]
+    .map(([label, value, tone]) => `<article class="metric ${tone}"><span>${label}</span><strong>${number(value)}</strong></article>`).join('');
+  $('#roster-okrugs').innerHTML = data.okrugs.map(item => {
+    const people = absentOnly ? item.people.filter(p => p.status === 'absent') : item.people;
+    if (!item.people.length) return '';
+    const rows = people.map(p => {
+      const [label, tone] = ROSTER_STATUS[p.status];
+      const note = p.status === 'absent' ? (p.replaced_by.length ? `Замена: ${escapeHTML(p.replaced_by.join(', '))}` : '') : '';
+      return `<tr><td>${escapeHTML(p.name)}</td><td>${escapeHTML(p.tik)}</td><td>${escapeHTML(p.precinct)}</td><td class="num">${number(p.yesterday)}</td><td class="num">${number(p.today)}</td><td>${p.last_yesterday || '—'}</td><td><span class="roster-chip ${tone}">${label}</span> ${note}</td></tr>`;
+    }).join('');
+    return `<details class="roster-okrug" ${item.absent ? 'open' : ''}><summary><strong>Округ ${escapeHTML(item.okrug)}</strong><span>вчера ${item.yesterday} · сегодня ${item.today} · нет сегодня <b>${item.absent}</b> · новых ${item.new}</span></summary>${people.length ? `<div class="table-scroll"><table><thead><tr><th>Интервьюер</th><th>ТИК</th><th>УИК</th><th>Вчера</th><th>Сегодня</th><th>Был в</th><th>Статус</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="panel-note">Все вчерашние интервьюеры уже вышли.</p>'}</details>`;
+  }).join('');
+}
+function lockRoster(message = '') {
+  rosterOpen = false; rosterData = null;
+  $('#roster-body').hidden = true; $('#roster-login').hidden = false; $('#roster-lock').hidden = true;
+  $('#roster-sub').textContent = 'Раздел закрыт отдельным паролем'; $('#roster-error').textContent = message;
+}
+let rosterData = null;
+async function loadRoster() {
+  if (!rosterOpen) return;
+  try {
+    rosterData = await request('/api/dashboard/roster');
+    $('#roster-login').hidden = true; $('#roster-body').hidden = false; $('#roster-lock').hidden = false; renderRoster(rosterData);
+  } catch (error) {
+    if (error.status === 401) lockRoster(); else { $('#roster-sub').textContent = error.message; }
+  }
+}
 async function load() {
   clearTimeout(timer); $('#refresh').disabled = true; status('', 'Обновляем данные'); $('#data-error').hidden = true;
   const query = new URLSearchParams();
@@ -478,13 +511,22 @@ async function load() {
   } catch (error) {
     if (error.status === 401) return showLogin('Сессия завершилась. Введите код ещё раз.');
     $('#data-error').textContent = error.message; $('#data-error').hidden = false; status('error','Ошибка обновления');
-  } finally { $('#refresh').disabled = false; timer = setTimeout(load,30000); }
+  } finally { $('#refresh').disabled = false; timer = setTimeout(load,30000); void loadRoster(); }
 }
 $('#login-form').addEventListener('submit', async event => {
   event.preventDefault(); $('#login-error').textContent = '';
   try { await request('/api/dashboard/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:$('#code').value})}); $('#code').value=''; await load(); }
   catch(error) { $('#login-error').textContent = error.message; }
 });
+$('#roster-login').addEventListener('submit', async event => {
+  event.preventDefault(); $('#roster-error').textContent = '';
+  try {
+    await request('/api/dashboard/roster/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:$('#roster-code').value})});
+    $('#roster-code').value = ''; rosterOpen = true; await loadRoster();
+  } catch (error) { $('#roster-error').textContent = error.message; }
+});
+$('#roster-lock').addEventListener('click', () => lockRoster());
+$('#roster-absent-only').addEventListener('change', () => { if (rosterData) renderRoster(rosterData); });
 $('#refresh').addEventListener('click',load);
 $('#day').addEventListener('change',event => { filters.day=event.target.value; filters.precinct=''; load(); });
 $('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });
