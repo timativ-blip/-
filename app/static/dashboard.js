@@ -332,7 +332,7 @@ function renderSummary(summary) {
     ['Всего анкет',summary.total,'За выбранный период','accent'],
     ['Отказались',summary.refusals,summary.total ? `${Math.round(summary.refusals*100/summary.total)}% от анкет` : 'Нет данных','warm'],
     ['Испортили бюллетень',summary.spoiled,'Отдельный вариант ответа',''],
-    ['Интервьюеров',summary.interviewers,'Уникальных смен',''],
+    ['Интервьюеров',summary.interviewers,'Уникальных людей',''],
     ['УИК с данными',summary.uiks,'Охвачено участков',''],
     ['ТИК с данными',summary.tiks,'Охвачено территорий',''],
   ];

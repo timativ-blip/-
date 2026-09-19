@@ -1048,3 +1048,17 @@ def test_health_is_light_and_needs_no_sheet(settings, monkeypatch):
     monkeypatch.setattr("app.main.read_sheet", boom)
     with TestClient(create_app(settings)) as client:
         assert client.get("/api/health").json() == {"ok": True}
+
+
+def test_interviewer_count_is_unique_people_across_days(settings):
+    precinct = next(p for p in settings.precincts if p["tik"] == BAL)
+    rows = []
+    for day, surname, name, shift in [("2026-09-18", "Чернец", "Аня", "s18"), ("2026-09-19", "Аня", "Чернец", "s19"),
+                                       ("2026-09-19", "Петров", "Олег", "s19b")]:
+        rows.append([f"{shift}-1", f"{day}T09:00:00+03:00", day, surname, name, precinct["id"], precinct["label"], "Единая Россия",
+                     "Мужской", "25–34", shift, f"{day}T09:00:00+03:00", BAL])
+    everything = dashboard_snapshot(rows, settings, requested_day="all")
+    assert everything["summary"]["interviewers"] == 2  # three shifts, two people
+    assert next(o for o in everything["okrug_stats"] if o["okrug"] == TIK_TO_OKRUG[BAL])["interviewers"] == 2
+    assert dashboard_snapshot(rows, settings, requested_day="2026-09-19")["summary"]["interviewers"] == 2
+    assert dashboard_snapshot(rows, settings, requested_day="2026-09-18")["summary"]["interviewers"] == 1

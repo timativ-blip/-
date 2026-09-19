@@ -1459,6 +1459,11 @@ def person_key(surname, name):
     return " ".join(sorted(tokens))
 
 
+def person_id(row):
+    """One person, whichever shifts or days they appear on."""
+    return person_key(row["surname"], row["name"]) or row["shift_id"]
+
+
 def build_roster(values, settings, now=None):
     """Who worked yesterday and today, who has not appeared today yet, split by okrug."""
     moment = now or datetime.now(settings.zone)
@@ -1577,7 +1582,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
     answers = Counter(row["answer"] for row in filtered)
     genders = Counter(row["gender"] for row in filtered if row["gender"])
     ages = Counter(row["age"] for row in filtered if row["age"])
-    shifts = {row["shift_id"] or f'{row["surname"]}|{row["name"]}' for row in filtered}
+    people = {person_id(row) for row in filtered}
     total = len(filtered)
 
     catalog_tiks = sorted({p.get("tik", "") for p in settings.precincts if p.get("tik")})
@@ -1596,7 +1601,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
             "refusals": sum(x["answer"] == "Отказался отвечать" for x in items),
             "spoiled": sum(x["answer"] == "Испортил бюллетень" for x in items),
             "tiks": len({x["tik"] for x in items}),
-            "interviewers": len({x["shift_id"] or f'{x["surname"]}|{x["name"]}' for x in items}),
+            "interviewers": len({person_id(x) for x in items}),
         })
     okrug_stats.sort(key=lambda item: (-item["total"], item["okrug"]))
 
@@ -1632,7 +1637,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
                 "refusals": sum(x["answer"] == "Отказался отвечать" for x in items),
                 "spoiled": sum(x["answer"] == "Испортил бюллетень" for x in items),
                 "uiks": len({x["precinct_id"] for x in items}),
-                "interviewers": len({x["shift_id"] or f'{x["surname"]}|{x["name"]}' for x in items}),
+                "interviewers": len({person_id(x) for x in items}),
             })
         tik_stats.sort(key=lambda item: (-item["total"], item["tik"]))
 
@@ -1647,7 +1652,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
                 "id": precinct["id"], "label": precinct["label"], "total": len(items),
                 "refusals": sum(x["answer"] == "Отказался отвечать" for x in items),
                 "spoiled": sum(x["answer"] == "Испортил бюллетень" for x in items),
-                "interviewers": len({x["shift_id"] or f'{x["surname"]}|{x["name"]}' for x in items}),
+                "interviewers": len({person_id(x) for x in items}),
             })
         uik_stats.sort(key=lambda item: (-item["total"], item["label"]))
         if requested_precinct:
@@ -1762,7 +1767,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
                                    for p in settings.precincts if p.get("tik") == requested_tik]
                                   if requested_tik else [])},
         "summary": {"total": total, "refusals": answers["Отказался отвечать"],
-                    "spoiled": answers["Испортил бюллетень"], "interviewers": len(shifts),
+                    "spoiled": answers["Испортил бюллетень"], "interviewers": len(people),
                     "uiks": len({row["precinct_id"] for row in filtered}),
                     "tiks": len({row["tik"] for row in filtered if row["tik"]})},
         "parties": parties,
