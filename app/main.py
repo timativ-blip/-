@@ -700,7 +700,7 @@ def forecast_shares(rows, weights=None):
         if part:
             replicates.append(part["final"])
     # Never below plain sampling error (which is also the fallback when there are too few UIK groups).
-    floor = [math.sqrt(max(p, 1 / full["valid"]) * (1 - max(p, 1 / full["valid"])) / full["valid"]) for p in full["final"]]
+    floor = [math.sqrt(max(0.0, min(max(p, 1 / full["valid"]), 1.0) * (1 - min(max(p, 1 / full["valid"]), 1.0)) / full["valid"])) for p in full["final"]]
     standard_error = list(floor)
     if len(replicates) >= 5:
         count = len(replicates)

@@ -817,7 +817,8 @@ def test_baseline_2021_is_loaded_and_renormalised():
     assert abs(sum(region.values()) - 100) < 0.5
     assert "Партия прямой демократии" not in region and "Яблоко" not in region
     assert region["Единая Россия"] > region["КПРФ"] > region["Новые люди"]
-    assert baseline_shares("128")["Новые люди"] > baseline_shares("123")["Новые люди"]
+    assert baseline_shares("123")["Новые люди"] > baseline_shares("128")["Новые люди"]  # 6.6% against 5.4% on the 2026 boundaries
+    assert baseline_shares("123")["Единая Россия"] < 40 < baseline_shares("121")["Единая Россия"]  # Mytishchi/Korolev vs Istra/Krasnogorsk
 
 
 def test_territory_weights_follow_okrug_electorate(settings):
@@ -1250,3 +1251,18 @@ def test_party_compare_gives_other_days_and_their_average(settings):
     scoped = dashboard_snapshot(values, settings, requested_okrug=TIK_TO_OKRUG[DMI])["party_compare"]
     assert scoped["days"] == [] or all(d["total"] for d in scoped["days"])
     assert dashboard_snapshot([], settings)["party_compare"] == {"selected": dashboard_snapshot([], settings)["selected_day"], "days": [], "average": None}
+
+
+def test_baseline_uses_the_2026_okrug_map_not_the_2021_numbers():
+    """The 2021 map had 11 okrugs (117-127); the 2026 map has 12 (118-129) with other boundaries."""
+    old = BASELINE["old_okrugs"]
+    assert sorted(old) == [str(n) for n in range(117, 128)] and sorted(BASELINE["okrugs"]) == [str(n) for n in range(118, 130)]
+    total_old = sum(e["voters"] for e in old.values())
+    total_new = sum(e["voters"] for e in BASELINE["okrugs"].values())
+    assert abs(total_new - total_old) / total_old < 0.03  # the split only moves electors between okrugs
+    for old_id in old:  # every 2021 okrug is fully distributed over the new ones
+        assert 95 <= sum(part.get(old_id, 0) for part in BASELINE["split"].values()) <= 101
+    valid = sum(e["valid"] for e in BASELINE["okrugs"].values())
+    er = sum(e["votes"]["Единая Россия"] for e in BASELINE["okrugs"].values()) * 100 / valid
+    er_official = sum(e["votes"]["Единая Россия"] for e in old.values()) * 100 / sum(e["valid"] for e in old.values())
+    assert abs(er - er_official) < 3  # the recalculated okrugs add up to the official regional result (share of all ballots vs of valid)

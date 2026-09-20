@@ -84,7 +84,7 @@
 
       <section class="panel table-panel"><header><div><p class="kicker">ТЕПЛОВАЯ КАРТА</p><h2>Партия × возраст</h2></div><label class="switch"><input id="age-heat-valid" type="checkbox"><span class="switch-track"></span><span>Только ответившие</span></label></header><div class="table-scroll"><table class="heatmap"><thead id="ageheat-head"></thead><tbody id="ageheat-body"></tbody></table></div><p class="panel-note table-note" id="ageheat-note"></p></section>
 
-      <section class="panel table-panel"><header><div><p class="kicker">ТЕПЛОВАЯ КАРТА</p><h2>Динамика к 2021</h2></div><span class="panel-note">опрос 2026 минус итоги Госдумы 2021, п.п.</span></header><div class="table-scroll"><table class="heatmap"><thead id="swing-head"></thead><tbody id="swing-body"></tbody></table></div><p class="panel-note table-note">Опрос — доля среди назвавших партию в округе. 2021 — итоги партийных списков (ЦИК), пересчитанные на те же партии. Жирным — разница вне 95%-й погрешности опроса; округа с числом ответивших меньше 30 не показаны. Это ориентир: список партий и способ голосования (ДЭГ) изменились, а опрос идёт только на участках.</p></section>
+      <section class="panel table-panel"><header><div><p class="kicker">ТЕПЛОВАЯ КАРТА</p><h2>Динамика к 2021</h2></div><span class="panel-note">опрос 2026 минус итоги Госдумы 2021, п.п.</span></header><div class="table-scroll"><table class="heatmap"><thead id="swing-head"></thead><tbody id="swing-body"></tbody></table></div><p class="panel-note table-note">Опрос — доля среди назвавших партию в округе. 2021 — итоги партийных списков, пересчитанные на границы округов 2026 года (протоколы УИК) и на те же партии. Жирным — разница вне 95%-й погрешности опроса; округа с числом ответивших меньше 30 не показаны. Это ориентир: список партий и способ голосования (ДЭГ) изменились, а опрос идёт только на участках.</p></section>
 
       <section class="panel table-panel" id="map-panel"><header><div><p class="kicker">КАРТОГРАММА</p><h2>Территории области</h2></div><span class="panel-note">клик по территории выбирает её в фильтрах</span></header>
         <div class="map-controls">
@@ -93,7 +93,7 @@
           <label class="focus-select">Партия<select id="map-focus" aria-label="Партия для слоёв «Доля» и «Индекс»"></select></label>
         </div>
         <div class="map-wrap"><div id="map" class="map"></div><div id="map-legend" class="map-legend"></div><div id="map-tip" class="map-tip" hidden></div></div>
-        <p class="panel-note table-note">Границы: © участники OpenStreetMap (ODbL). Территории с числом ответивших меньше 30 не закрашены. Явка 2026 по ТИК в открытых источниках не публикуется, поэтому слой «Явка 2021» показывает итоги Госдумы 2021 (ЦИК) по округам. Карта следует фильтру даты.</p>
+        <p class="panel-note table-note">Границы: © участники OpenStreetMap (ODbL). Территории с числом ответивших меньше 30 не закрашены. Явка 2026 по ТИК в открытых источниках не публикуется, поэтому слой «Явка 2021» показывает явку Госдумы 2021 на территории каждого округа 2026 года (оценка по долям старых округов). Карта следует фильтру даты.</p>
       </section>
 
       <section class="panel timeline-panel"><header><div><p class="kicker">ДИНАМИКА</p><h2>Анкеты по времени</h2></div><span class="panel-note">по времени заполнения</span></header><div id="hours-chart" class="hour-chart"></div></section>
