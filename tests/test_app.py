@@ -912,14 +912,17 @@ def test_roster_lists_interviewers_missing_today_by_okrug(settings):
                                       ("2026-09-19", DMI, "Матвей", "Шадура", 1), ("2026-09-19", BAL, "Новиков", "Иван", 1),
                                       ("2026-09-17", BAL, "Старый", "Давно", 9)])
     roster = build_roster(values, settings, now)
-    assert roster["today"] == "2026-09-19" and roster["yesterday"] == "2026-09-18"
-    assert {k: roster["totals"][k] for k in ("yesterday", "today", "absent", "new", "both")} == {"yesterday": 3, "today": 3, "absent": 1, "new": 1, "both": 2}
+    assert roster["today"] == "2026-09-19" and roster["yesterday"] == "2026-09-18" and roster["days"] == ["2026-09-17", "2026-09-18", "2026-09-19"]
+    assert {k: roster["totals"][k] for k in ("all", "yesterday", "today", "absent", "new", "both")} == {"all": 5, "yesterday": 3, "today": 3, "absent": 2, "new": 1, "both": 2}
     people = {p["name"]: p for okrug in roster["okrugs"] for p in okrug["people"]}
     assert people["Петров Олег"]["status"] == "absent" and people["Петров Олег"]["yesterday"] == 4
     assert people["Иванова Анна"]["status"] == "both" and people["Новиков Иван"]["status"] == "new"
-    assert people["Шадура Матвей"]["status"] == "both" and "Старый Давно" not in people
+    assert people["Шадура Матвей"]["status"] == "both"
+    old = people["Старый Давно"]  # worked only two days ago: still counted, and missing today
+    assert old["status"] == "absent" and old["by_day"] == {"2026-09-17": 9} and old["last_day"] == "2026-09-17" and old["last_day_count"] == 9
+    assert people["Иванова Анна"]["by_day"] == {"2026-09-18": 5, "2026-09-19": 2} and people["Иванова Анна"]["total"] == 7
     okrug = next(o for o in roster["okrugs"] if o["okrug"] == TIK_TO_OKRUG[BAL])
-    assert okrug["absent"] == 1 and okrug["people"][0]["name"] == "Петров Олег"
+    assert okrug["absent"] == 2 and okrug["all"] == 4 and [p["name"] for p in okrug["people"][:2]] == ["Старый Давно", "Петров Олег"]
 
 
 def test_roster_flags_replacement_on_same_precinct(settings):

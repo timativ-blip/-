@@ -1665,17 +1665,23 @@ def person_id(row):
     return person_key(row["surname"], row["name"]) or row["shift_id"]
 
 
+ROSTER_MAX_DAYS = 10
+
+
 def build_roster(values, settings, now=None):
-    """Who worked yesterday and today, who has not appeared today yet, split by okrug."""
+    """Every interviewer across all days: who worked on which day, who has not appeared today although they worked earlier, by okrug."""
     moment = now or datetime.now(settings.zone)
     today = moment.date().isoformat()
     yesterday = (moment.date() - timedelta(days=1)).isoformat()
+    rows = [r for r in parse_sheet_rows(values) if r["surname"] or r["name"]]
+    days = sorted({r["day"] for r in rows if re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["day"]) and r["day"] <= today} | {today})[-ROSTER_MAX_DAYS:]
+    day_set = set(days)
     people = {}
-    for row in parse_sheet_rows(values):
-        if row["day"] not in (today, yesterday) or not (row["surname"] or row["name"]):
+    for row in rows:
+        if row["day"] not in day_set:
             continue
-        entry = people.setdefault(person_key(row["surname"], row["name"]), {"names": Counter(), "days": {today: Counter(), yesterday: Counter()},
-                                                                            "tiks": {today: Counter(), yesterday: Counter()}, "last": {}, "first": {}})
+        entry = people.setdefault(person_key(row["surname"], row["name"]), {"names": Counter(), "days": defaultdict(Counter),
+                                                                            "tiks": defaultdict(Counter), "last": {}, "first": {}})
         entry["names"][f'{row["surname"]} {row["name"]}'.strip()] += 1
         entry["days"][row["day"]][row["precinct"]] += 1
         entry["tiks"][row["day"]][row["tik"]] += 1
@@ -1686,45 +1692,49 @@ def build_roster(values, settings, now=None):
             entry["first"][row["day"]] = min(stamp, entry["first"].get(row["day"], stamp))
     today_uik = defaultdict(list)
     for entry in people.values():
-        for precinct in entry["days"][today]:
+        for precinct in entry["days"].get(today, {}):
             today_uik[precinct].append(entry["names"].most_common(1)[0][0])
     okrugs = {okrug: {"okrug": okrug, "people": []} for okrug in sorted(OKRUGS)}
     for entry in people.values():
-        was, is_now = sum(entry["days"][yesterday].values()), sum(entry["days"][today].values())
-        tik = (entry["tiks"][yesterday] or entry["tiks"][today]).most_common(1)[0][0]
+        by_day = {d: sum(entry["days"][d].values()) for d in days if entry["days"].get(d)}
+        earlier = [d for d in days if d != today and d in by_day]
+        is_now = by_day.get(today, 0)
+        latest = today if is_now else earlier[-1]
+        tik = entry["tiks"][latest].most_common(1)[0][0]
         if tik not in TIK_TO_OKRUG:
             continue
         name = entry["names"].most_common(1)[0][0]
-        precinct = (entry["days"][yesterday] or entry["days"][today]).most_common(1)[0][0]
-        status = "both" if was and is_now else "absent" if was else "new"
+        precinct = entry["days"][latest].most_common(1)[0][0]
+        status = "both" if earlier and is_now else "absent" if earlier else "new"
         minutes = activity = None
         if is_now and today in entry["last"]:
             minutes = max(0, int((moment - entry["last"][today]).total_seconds() // 60))
             activity = ("done" if moment.hour >= ROSTER_SHIFT_END_HOUR else "active" if minutes <= ROSTER_ACTIVE_MINUTES
                         else "pause" if minutes <= ROSTER_PAUSE_MINUTES else "silent")
+        last_day = earlier[-1] if earlier else None
         replaced_by = [other for other in today_uik.get(precinct, []) if other != name] if status == "absent" else []
         okrugs[TIK_TO_OKRUG[tik]]["people"].append({
-            "name": name, "tik": tik, "precinct": precinct, "status": status, "yesterday": was, "today": is_now,
-            "last_yesterday": entry["last"][yesterday].strftime("%H:%M") if yesterday in entry["last"] else None,
+            "name": name, "tik": tik, "precinct": precinct, "status": status, "by_day": by_day, "total": sum(by_day.values()),
+            "days_worked": len(by_day), "yesterday": by_day.get(yesterday, 0), "today": is_now,
+            "last_day": last_day, "last_day_count": by_day.get(last_day, 0) if last_day else 0,
+            "last_day_time": entry["last"][last_day].strftime("%H:%M") if last_day and last_day in entry["last"] else None,
             "first_today": entry["first"][today].strftime("%H:%M") if today in entry["first"] else None,
             "last_today": entry["last"][today].strftime("%H:%M") if today in entry["last"] else None,
-            "minutes_since": minutes, "activity": activity,
-            "replaced_by": replaced_by})
-    order = {"absent": 0, "new": 1, "both": 2}
+            "minutes_since": minutes, "activity": activity, "replaced_by": replaced_by})
     result = []
     for item in okrugs.values():
-        item["people"].sort(key=lambda p: (order[p["status"]] if p["status"] == "absent" else 1,
-                                            -p["yesterday"] if p["status"] == "absent" else -(p["minutes_since"] or 0), p["name"]))
+        item["people"].sort(key=lambda p: (0 if p["status"] == "absent" else 1,
+                                            -p["total"] if p["status"] == "absent" else -(p["minutes_since"] or 0), p["name"]))
         counts = Counter(p["status"] for p in item["people"])
-        result.append({"okrug": item["okrug"], "yesterday": counts["absent"] + counts["both"], "today": counts["new"] + counts["both"],
-                       "absent": counts["absent"], "new": counts["new"], "both": counts["both"], "people": item["people"]})
-    totals = {key: sum(item[key] for item in result) for key in ("yesterday", "today", "absent", "new", "both")}
+        result.append({"okrug": item["okrug"], "all": len(item["people"]), "yesterday": sum(1 for p in item["people"] if p["yesterday"]),
+                       "today": counts["new"] + counts["both"], "absent": counts["absent"], "new": counts["new"], "both": counts["both"],
+                       "silent": sum(1 for p in item["people"] if p["activity"] == "silent"),
+                       "pause": sum(1 for p in item["people"] if p["activity"] == "pause"), "people": item["people"]})
+    totals = {key: sum(item[key] for item in result) for key in ("all", "yesterday", "today", "absent", "new", "both")}
     for level in ("active", "pause", "silent"):
         totals[level] = sum(1 for item in result for p in item["people"] if p["activity"] == level)
-    for item in result:
-        item["silent"] = sum(1 for p in item["people"] if p["activity"] == "silent")
-        item["pause"] = sum(1 for p in item["people"] if p["activity"] == "pause")
-    return {"today": today, "yesterday": yesterday, "generated_at": moment.isoformat(), "totals": totals, "thresholds": {"active": ROSTER_ACTIVE_MINUTES, "pause": ROSTER_PAUSE_MINUTES}, "okrugs": result}
+    return {"today": today, "yesterday": yesterday, "days": days, "generated_at": moment.isoformat(), "totals": totals,
+            "thresholds": {"active": ROSTER_ACTIVE_MINUTES, "pause": ROSTER_PAUSE_MINUTES}, "okrugs": result}
 
 
 def build_map_data(day_rows):
