@@ -593,27 +593,33 @@ function agoLabel(minutes) {
   return minutes < 60 ? `${minutes} мин назад` : `${Math.floor(minutes / 60)} ч ${minutes % 60} мин назад`;
 }
 function renderRoster(data) {
-  const totals = data.totals, view = $('#roster-view').value, days = data.days;
+  const totals = data.totals, view = $('#roster-view').value, days = data.days, live = data.live;
   const dayLabel = iso => iso.slice(8, 10) + '.' + iso.slice(5, 7);
-  $('#roster-sub').textContent = `Все дни: ${days.map(dayLabel).join(', ')} · сегодня ${dateLabel(data.today)}`;
-  $('#roster-summary').innerHTML = [['Людей за все дни', totals.all, ''], ['Сегодня вышли', totals.today, ''], ['Нет сегодня (были раньше)', totals.absent, 'warn'],
-    ['Работают сейчас', totals.active, ''], ['Пауза до часа', totals.pause, ''], ['Молчат больше часа', totals.silent, 'warn']]
+  const when = live ? 'сегодня' : 'в этот день';
+  const box = $('#roster-days');
+  box.innerHTML = '<span>День:</span><div class="seg-group">' + data.available_days.slice().reverse().map(d => `<button class="seg${d === data.today ? ' active' : ''}" type="button" data-rday="${d}">${dayLabel(d)}${d === data.available_days[data.available_days.length - 1] ? ' (сегодня)' : ''}</button>`).join('') + '</div>';
+  $('#roster-sub').textContent = `${live ? 'Сегодня' : 'День'} ${dateLabel(data.today)} · дни в таблице: ${days.map(dayLabel).join(', ')}`;
+  const tiles = [['Людей до этого дня включительно', totals.all, ''], [live ? 'Сегодня вышли' : 'Вышли в этот день', totals.today, ''], [live ? 'Нет сегодня (были раньше)' : 'Нет в этот день (были раньше)', totals.absent, 'warn']];
+  if (live) tiles.push(['Работают сейчас', totals.active, ''], ['Пауза до часа', totals.pause, ''], ['Молчат больше часа', totals.silent, 'warn']);
+  else tiles.push(['Новые в этот день', totals.new, '']);
+  $('#roster-summary').innerHTML = tiles
     .map(([label, value, tone]) => `<article class="metric ${tone}"><span>${label}</span><strong>${number(value)}</strong></article>`).join('');
   const keep = {absent: p => p.status === 'absent', silent: p => p.activity === 'silent', today: p => p.status !== 'absent', all: () => true}[view];
-  const head = `<tr><th>Интервьюер</th><th>ТИК</th><th>УИК</th>${days.map(d => `<th class="num">${dayLabel(d)}${d === data.today ? ' (сегодня)' : ''}</th>`).join('')}<th class="num">Всего</th><th>Последняя анкета сегодня</th><th>Статус</th></tr>`;
+  const head = `<tr><th>Интервьюер</th><th>ТИК</th><th>УИК</th>${days.map(d => `<th class="num">${dayLabel(d)}${d === data.today ? (live ? ' (сегодня)' : ' (выбран)') : ''}</th>`).join('')}<th class="num">Всего</th>${live ? '<th>Последняя анкета сегодня</th>' : ''}<th>Статус</th></tr>`;
   $('#roster-okrugs').innerHTML = data.okrugs.map(item => {
     const people = item.people.filter(keep);
     if (!item.people.length) return '';
     const rows = people.map(p => {
-      const [label, tone] = p.activity ? ROSTER_ACTIVITY[p.activity] : ROSTER_STATUS[p.status];
+      const [label0, tone] = p.activity ? ROSTER_ACTIVITY[p.activity] : ROSTER_STATUS[p.status];
+      const label = !live && p.status === 'absent' ? 'Нет в этот день' : label0;
       const note = p.status === 'absent'
         ? `последний раз ${dayLabel(p.last_day)} (${number(p.last_day_count)} анк.${p.last_day_time ? ', до ' + p.last_day_time : ''})${p.replaced_by.length ? ` · Замена: ${escapeHTML(p.replaced_by.join(', '))}` : ''}`
-        : p.status === 'new' ? 'новый сегодня' : '';
+        : p.status === 'new' ? `новый ${when}` : '';
       const last = p.last_today ? `${p.last_today} · ${agoLabel(p.minutes_since)}` : '—';
       const cells = days.map(d => `<td class="num">${p.by_day[d] ? number(p.by_day[d]) : '—'}</td>`).join('');
-      return `<tr><td>${escapeHTML(p.name)}</td><td>${escapeHTML(p.tik)}</td><td>${escapeHTML(p.precinct)}</td>${cells}<td class="num"><strong>${number(p.total)}</strong></td><td>${last}</td><td><span class="roster-chip ${tone}">${label}</span> ${note}</td></tr>`;
+      return `<tr><td>${escapeHTML(p.name)}</td><td>${escapeHTML(p.tik)}</td><td>${escapeHTML(p.precinct)}</td>${cells}<td class="num"><strong>${number(p.total)}</strong></td>${live ? `<td>${last}</td>` : ''}<td><span class="roster-chip ${tone}">${label}</span> ${note}</td></tr>`;
     }).join('');
-    return `<details class="roster-okrug" ${item.absent || item.silent ? 'open' : ''}><summary><strong>Округ ${escapeHTML(item.okrug)}</strong><span>за все дни ${item.all} · сегодня ${item.today} · нет сегодня <b>${item.absent}</b> · молчат <b>${item.silent}</b> · пауза ${item.pause}</span></summary>${people.length ? `<div class="table-scroll"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div>` : '<p class="panel-note">В этом фильтре никого нет.</p>'}</details>`;
+    return `<details class="roster-okrug" ${item.absent || item.silent ? 'open' : ''}><summary><strong>Округ ${escapeHTML(item.okrug)}</strong><span>всего ${item.all} · ${when} ${item.today} · нет ${when} <b>${item.absent}</b>${live ? ` · молчат <b>${item.silent}</b> · пауза ${item.pause}` : ''}</span></summary>${people.length ? `<div class="table-scroll"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div>` : '<p class="panel-note">В этом фильтре никого нет.</p>'}</details>`;
   }).join('');
 }
 function lockRoster(message = '') {
@@ -622,10 +628,11 @@ function lockRoster(message = '') {
   $('#roster-sub').textContent = 'Раздел закрыт отдельным паролем'; $('#roster-error').textContent = message;
 }
 let rosterData = null;
+let rosterDay = '';  // '' means the running day
 async function loadRoster() {
   if (!rosterOpen) return;
   try {
-    rosterData = await request('/api/dashboard/roster');
+    rosterData = await request('/api/dashboard/roster' + (rosterDay ? '?day=' + encodeURIComponent(rosterDay) : ''));
     $('#roster-login').hidden = true; $('#roster-body').hidden = false; $('#roster-lock').hidden = false; renderRoster(rosterData);
   } catch (error) {
     if (error.status === 401) lockRoster(); else { $('#roster-sub').textContent = error.message; }
@@ -690,6 +697,13 @@ document.querySelectorAll('[data-pfmode]').forEach(button => button.addEventList
   try { localStorage.setItem('partyForecastMode', partyForecastMode); } catch { /* storage may be blocked */ }
   renderPartyChart();
 }));
+$('#roster-days').addEventListener('click', event => {
+  const button = event.target.closest('[data-rday]');
+  if (!button) return;
+  const latest = rosterData && rosterData.available_days[rosterData.available_days.length - 1];
+  rosterDay = button.dataset.rday === latest ? '' : button.dataset.rday;
+  void loadRoster();
+});
 $('#refresh').addEventListener('click',load);
 $('#day').addEventListener('change',event => { filters.day=event.target.value; filters.precinct=''; load(); });
 $('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });

@@ -1668,13 +1668,17 @@ def person_id(row):
 ROSTER_MAX_DAYS = 10
 
 
-def build_roster(values, settings, now=None):
-    """Every interviewer across all days: who worked on which day, who has not appeared today although they worked earlier, by okrug."""
+def build_roster(values, settings, now=None, day=None):
+    """Every interviewer across the days up to the chosen one (default: today): who worked on which day, who is missing on the
+    chosen day although they worked earlier, by okrug. Live activity is shown only for the running day."""
     moment = now or datetime.now(settings.zone)
-    today = moment.date().isoformat()
-    yesterday = (moment.date() - timedelta(days=1)).isoformat()
+    real_today = moment.date().isoformat()
+    today = day if day and day <= real_today else real_today  # "today" below means the chosen day
+    live = today == real_today
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
     rows = [r for r in parse_sheet_rows(values) if r["surname"] or r["name"]]
-    days = sorted({r["day"] for r in rows if re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["day"]) and r["day"] <= today} | {today})[-ROSTER_MAX_DAYS:]
+    every_day = sorted({r["day"] for r in rows if re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["day"]) and r["day"] <= real_today} | {real_today})
+    days = sorted({d for d in every_day if d <= today} | {today})[-ROSTER_MAX_DAYS:]
     day_set = set(days)
     people = {}
     for row in rows:
@@ -1707,7 +1711,7 @@ def build_roster(values, settings, now=None):
         precinct = entry["days"][latest].most_common(1)[0][0]
         status = "both" if earlier and is_now else "absent" if earlier else "new"
         minutes = activity = None
-        if is_now and today in entry["last"]:
+        if live and is_now and today in entry["last"]:
             minutes = max(0, int((moment - entry["last"][today]).total_seconds() // 60))
             activity = ("done" if moment.hour >= ROSTER_SHIFT_END_HOUR else "active" if minutes <= ROSTER_ACTIVE_MINUTES
                         else "pause" if minutes <= ROSTER_PAUSE_MINUTES else "silent")
@@ -1733,7 +1737,7 @@ def build_roster(values, settings, now=None):
     totals = {key: sum(item[key] for item in result) for key in ("all", "yesterday", "today", "absent", "new", "both")}
     for level in ("active", "pause", "silent"):
         totals[level] = sum(1 for item in result for p in item["people"] if p["activity"] == level)
-    return {"today": today, "yesterday": yesterday, "days": days, "generated_at": moment.isoformat(), "totals": totals,
+    return {"today": today, "live": live, "yesterday": yesterday, "days": days, "available_days": every_day, "generated_at": moment.isoformat(), "totals": totals,
             "thresholds": {"active": ROSTER_ACTIVE_MINUTES, "pause": ROSTER_PAUSE_MINUTES}, "okrugs": result}
 
 
@@ -2161,8 +2165,8 @@ def create_app(settings=None):
             return snapshot
         return cached_view(("data", day, okrug, tik, precinct), compute)
 
-    def roster_view():
-        return cached_view(("roster",), lambda: build_roster(sheet_values(), settings))
+    def roster_view(day=None):
+        return cached_view(("roster", day), lambda: build_roster(sheet_values(), settings, day=day))
 
     def data_age():
         return round(time.monotonic() - state["loaded_at"]) if state["loaded_at"] else None
@@ -2289,8 +2293,10 @@ def create_app(settings=None):
         return {"ok": True}
 
     @app.get("/api/dashboard/roster", dependencies=[Depends(dashboard_authorized), Depends(roster_authorized)])
-    def roster_data():
-        return {**roster_view(), "data_age": data_age()}
+    def roster_data(day: str | None = None):
+        if day is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            raise HTTPException(422, "Неверная дата")
+        return {**roster_view(day), "data_age": data_age()}
 
     @app.get("/api/dashboard/detail", dependencies=[Depends(dashboard_authorized)])
     def dashboard_detail_view(kind: str, key: str, focus: str = DEFAULT_FOCUS, day: str | None = None,

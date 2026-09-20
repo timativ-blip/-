@@ -1269,3 +1269,33 @@ def test_baseline_uses_the_2026_okrug_map_not_the_2021_numbers():
     er = sum(e["votes"]["Единая Россия"] for e in BASELINE["okrugs"].values()) * 100 / valid
     er_official = sum(e["votes"]["Единая Россия"] for e in old.values()) * 100 / sum(e["valid"] for e in old.values())
     assert abs(er - er_official) < 3  # the recalculated okrugs add up to the official regional result (share of all ballots vs of valid)
+
+
+def test_roster_for_a_chosen_past_day(settings):
+    from app.main import build_roster
+    now = datetime(2026, 9, 20, 15, 0, tzinfo=settings.zone)
+    values = roster_values(settings, [("2026-09-17", BAL, "Старый", "Давно", 4), ("2026-09-18", BAL, "Иванова", "Анна", 5),
+                                      ("2026-09-19", BAL, "Иванова", "Анна", 2), ("2026-09-19", DMI, "Петров", "Олег", 3),
+                                      ("2026-09-20", BAL, "Иванова", "Анна", 1)])
+    live = build_roster(values, settings, now)
+    assert live["live"] is True and live["today"] == "2026-09-20" and live["available_days"] == ["2026-09-17", "2026-09-18", "2026-09-19", "2026-09-20"]
+    past = build_roster(values, settings, now, day="2026-09-19")
+    assert past["live"] is False and past["today"] == "2026-09-19" and past["days"] == ["2026-09-17", "2026-09-18", "2026-09-19"]  # nothing after the chosen day
+    people = {p["name"]: p for o in past["okrugs"] for p in o["people"]}
+    assert people["Иванова Анна"]["status"] == "both" and people["Иванова Анна"]["today"] == 2 and "2026-09-20" not in people["Иванова Анна"]["by_day"]
+    assert people["Петров Олег"]["status"] == "new"  # first seen on the 19th
+    assert people["Старый Давно"]["status"] == "absent" and people["Старый Давно"]["last_day"] == "2026-09-17"
+    assert all(p["activity"] is None and p["minutes_since"] is None for p in people.values())  # live activity only for the running day
+    assert build_roster(values, settings, now, day="2026-09-30")["today"] == "2026-09-20"  # a future day falls back to today
+
+
+def test_roster_endpoint_takes_a_day(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    monkeypatch.setattr("app.main.read_sheet", lambda _: [])
+    monkeypatch.setattr("app.main.read_anomaly_statuses", lambda _s, session=None: {})
+    with TestClient(create_app(settings)) as client:
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        client.post("/api/dashboard/roster/login", json={"code": "exitpoll"})
+        assert client.get("/api/dashboard/roster", params={"day": "2026-09-18"}).status_code == 200
+        assert client.get("/api/dashboard/roster", params={"day": "oops"}).status_code == 422
