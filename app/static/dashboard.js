@@ -53,6 +53,8 @@ const PARTY_LOGOS = {'Единая Россия':'edinaya-rossiya', 'КПРФ':'
   'Зелёные':'zelenye', 'Родина':'rodina', 'Яблоко':'yabloko', 'Партия прямой демократии':'pryamaya-demokratiya', 'Партия пенсионеров':'pensionery',
   'Коммунисты России':'kommunisty-rossii'};
 let lastParties = null;
+let kpiBase = (() => { try { return localStorage.getItem('kpiBase') === 'avg2' ? 'avg2' : 'prev'; } catch { return 'prev'; } })();
+let lastCompare = null, lastSummary = null;
 // One hue for every other chart: the bigger the value, the darker and richer the bar (scaled between the chart's own min and max).
 function scaleColor(value, values) {
   const low = Math.min(...values), high = Math.max(...values), from = [196, 216, 190], to = [33, 70, 48];
@@ -184,6 +186,7 @@ function renderAgeHeatmap(heat) {
 }
 function detailQuery(kind, key) {
   const query = new URLSearchParams({kind, key, focus: focusParty});
+  if (kind === 'kpi') query.set('base', kpiBase);
   if (filters.day) query.set('day', filters.day);
   if (filters.okrug) query.set('okrug', filters.okrug);
   if (filters.tik) query.set('tik', filters.tik);
@@ -352,7 +355,9 @@ function renderMap(payload) {
   mapPayload = payload;
   if (mapGeo === null) void initMap(); else paintMap();
 }
-function renderSummary(summary, compare) {
+function renderSummary(summary, comparisons) {
+  lastSummary = summary; lastCompare = comparisons;
+  const compare = comparisons && comparisons[kpiBase];
   const cards = [
     ['total','Всего анкет',summary.total,'За выбранный период','accent'],
     ['refusals','Отказались',summary.refusals,summary.total ? `${Math.round(summary.refusals*100/summary.total)}% от анкет` : 'Нет данных','tone-red'],
@@ -364,10 +369,12 @@ function renderSummary(summary, compare) {
   const deltaLine = key => {
     const item = compare && compare.values[key];
     if (!compare) return '';
-    if (!compare.has_previous || !item || item.before === null) return 'вчера данных нет';
+    const target = kpiBase === 'avg2' ? 'среднему за 2 дня' : 'вчера';
+    if (!compare.has_previous || !item || item.before === null) return kpiBase === 'avg2' ? 'нет данных за прошлые дни' : 'вчера данных нет';
     const diff = item.today - item.before, arrow = diff > 0 ? '▲' : diff < 0 ? '▼' : '=';
     const pct = item.change === null ? '' : ` ${Math.abs(item.change)}%`;
-    return `${arrow}${pct} к вчера${compare.cutoff ? ' ' + compare.cutoff : ''}`;
+    const partial = kpiBase === 'avg2' && compare.days === 1 ? ' (1 день)' : '';
+    return `${arrow}${pct} к ${target}${partial}${compare.cutoff ? ' ' + compare.cutoff : ''}`;
   };
   $('#summary').innerHTML = cards.map(([key,label,value,note,tone]) => `<article class="metric ${tone}" data-kind="kpi" data-key="${key}" role="button" tabindex="0" title="Сравнить с прошлым днём"><span>${escapeHTML(label)}</span><strong>${number(value)}</strong><small>${escapeHTML(note)}</small><em class="delta">${escapeHTML(deltaLine(key))}</em></article>`).join('');
 }
@@ -574,6 +581,14 @@ $('#roster-open').addEventListener('click', openRoster);
 $('#roster-code').addEventListener('keydown', event => { if (event.key === 'Enter') void openRoster(); });
 $('#roster-lock').addEventListener('click', () => lockRoster());
 $('#roster-view').addEventListener('change', () => { if (rosterData) renderRoster(rosterData); });
+document.querySelectorAll('[data-base]').forEach(button => button.addEventListener('click', () => {
+  kpiBase = button.dataset.base;
+  try { localStorage.setItem('kpiBase', kpiBase); } catch { /* storage may be blocked */ }
+  document.querySelectorAll('[data-base]').forEach(other => other.classList.toggle('active', other === button));
+  if (lastSummary) renderSummary(lastSummary, lastCompare);
+  if (activeDetail && activeDetail.kind === 'kpi') void refreshDetail(false);
+}));
+document.querySelectorAll('[data-base]').forEach(button => button.classList.toggle('active', button.dataset.base === kpiBase));
 $('#refresh').addEventListener('click',load);
 $('#day').addEventListener('change',event => { filters.day=event.target.value; filters.precinct=''; load(); });
 $('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });
@@ -620,7 +635,7 @@ $('#focus-party').addEventListener('change', event => {
   try { localStorage.setItem('focusParty', focusParty); } catch { /* storage may be blocked */ }
   void refreshDetail(true);
 });
-document.querySelectorAll('.seg').forEach(button => button.addEventListener('click', () => {
+document.querySelectorAll('.seg[data-layer], .seg[data-level]').forEach(button => button.addEventListener('click', () => {
   if (button.dataset.layer) mapLayer = button.dataset.layer; else mapLevel = button.dataset.level;
   document.querySelectorAll(`.seg[data-${button.dataset.layer ? 'layer' : 'level'}]`).forEach(other => other.classList.toggle('active', other === button));
   paintMap();

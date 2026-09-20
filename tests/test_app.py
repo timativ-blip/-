@@ -1096,13 +1096,13 @@ def kpi_values(settings, spec):
 def test_kpi_compare_uses_the_same_clock_time_for_the_running_day(settings):
     spec = ([("2026-09-18", "09:00", BAL, "Единая Россия", "А")] * 4 + [("2026-09-18", "15:00", BAL, "Отказался отвечать", "Б")] * 6
             + [("2026-09-19", "09:30", BAL, "Единая Россия", "А")] * 3 + [("2026-09-19", "10:00", BAL, "Отказался отвечать", "В")] * 2)
-    compare = dashboard_snapshot(kpi_values(settings, spec), settings)["compare"]
-    assert compare["day"] == "2026-09-19" and compare["previous"] == "2026-09-18" and compare["cutoff"] == "10:00"
+    compare = dashboard_snapshot(kpi_values(settings, spec), settings)["compare"]["prev"]
+    assert compare["day"] == "2026-09-19" and compare["days"] == 1 and compare["cutoff"] == "10:00"
     total = compare["values"]["total"]
     assert (total["today"], total["before"], total["change"]) == (5, 4, 25.0)  # yesterday's afternoon rows are not counted
     assert compare["values"]["refusals"]["before"] == 0 and compare["values"]["refusals"]["change"] is None
     assert compare["values"]["interviewers"] == {"today": 2, "before": 1, "change": 100.0}
-    finished = dashboard_snapshot(kpi_values(settings, spec), settings, requested_day="2026-09-18")["compare"]
+    finished = dashboard_snapshot(kpi_values(settings, spec), settings, requested_day="2026-09-18")["compare"]["prev"]
     assert finished["has_previous"] is False and finished["values"]["total"]["before"] is None
 
 
@@ -1112,7 +1112,7 @@ def test_kpi_detail_explains_the_change(settings):
     payload = dashboard_detail(values, settings, "kpi", "total")
     assert payload["role"] == "Сравнение с прошлым днём" and "на 50% меньше" in payload["headline"]["text"]
     assert [m["value"] for m in payload["metrics"][:2]] == ["5", "10"] and payload["metrics"][2]["value"] == "-5 (-50%)"
-    hours = payload["sections"][0]["tables"][0]["rows"]
+    hours = payload["sections"][0]["tables"][1]["rows"]
     assert hours[0][0]["t"] == "до 09:00" and hours[1][3]["t"] == "-5"  # 09:30 today against 09:00 yesterday: 5 vs 10 by the end of hour 9
     okrug = next(r for r in payload["sections"][1]["tables"][0]["rows"] if r[0]["t"] == f"Округ {TIK_TO_OKRUG[BAL]}")
     assert okrug[1]["t"] == "5" and okrug[2]["t"] == "10"
@@ -1177,3 +1177,38 @@ def test_batch_limits_and_auth(settings, monkeypatch):
 
 def test_dashboard_refreshes_every_minute_by_default(settings):
     assert settings.dashboard_refresh_seconds == 60
+
+
+def test_kpi_average_of_two_previous_days(settings):
+    spec = ([("2026-09-17", "09:00", BAL, "Единая Россия", "А")] * 6
+            + [("2026-09-18", "09:00", BAL, "Единая Россия", "А")] * 10 + [("2026-09-18", "15:00", BAL, "Единая Россия", "А")] * 4
+            + [("2026-09-19", "09:30", BAL, "Единая Россия", "А")] * 12)
+    values = kpi_values(settings, spec)
+    compare = dashboard_snapshot(values, settings)["compare"]
+    assert compare["avg2"]["days"] == 2 and compare["prev"]["days"] == 1
+    assert compare["avg2"]["values"]["total"] == {"today": 12, "before": 8.0, "change": 50.0}  # (6 + 10) / 2 at 09:30
+    assert compare["prev"]["values"]["total"]["before"] == 10.0
+    payload = dashboard_detail(values, settings, "kpi", "total", base="avg2")
+    assert payload["role"] == "Сравнение со средним за 2 дня" and payload["subtitle"].startswith("19.09 против 17.09–18.09")
+    assert "12 анкет против 8 в среднем за 2 дня: на 50% больше." in payload["headline"]["text"]
+    labels = {m["label"]: m["value"] for m in payload["metrics"]}
+    assert labels["Среднее за 2 дня к 09:30"] == "8" and labels["Среднее за 2 дня за весь день"] == "10"
+    days = payload["sections"][0]["tables"][0]["rows"]
+    assert [r[0]["t"] for r in days] == ["19.09 (сегодня)", "18.09", "17.09"]
+    only_one = dashboard_detail(kpi_values(settings, spec[6:]), settings, "kpi", "total", base="avg2")
+    assert "второго дня нет" in only_one["headline"]["text"]
+    odd = ([("2026-09-17", "09:00", BAL, "Единая Россия", "А")] * 5 + [("2026-09-18", "09:00", BAL, "Единая Россия", "А")] * 2
+           + [("2026-09-19", "09:30", BAL, "Единая Россия", "А")] * 7)
+    fractional = dashboard_detail(kpi_values(settings, odd), settings, "kpi", "total", base="avg2")
+    assert "7 анкет против 3.5 в среднем за 2 дня: на 100% больше." in fractional["headline"]["text"]
+
+
+def test_kpi_base_is_validated(settings, monkeypatch):
+    settings.dashboard_code = "coordinator-secret"
+    settings.spreadsheet = "test-sheet"
+    monkeypatch.setattr("app.main.read_sheet", lambda _: [])
+    monkeypatch.setattr("app.main.read_anomaly_statuses", lambda _s, session=None: {})
+    with TestClient(create_app(settings)) as client:
+        client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
+        assert client.get("/api/dashboard/detail", params={"kind": "kpi", "key": "total", "base": "avg2"}).status_code == 200
+        assert client.get("/api/dashboard/detail", params={"kind": "kpi", "key": "total", "base": "bogus"}).status_code == 422
