@@ -53,6 +53,7 @@ const PARTY_LOGOS = {'Единая Россия':'edinaya-rossiya', 'КПРФ':'
   'Зелёные':'zelenye', 'Родина':'rodina', 'Яблоко':'yabloko', 'Партия прямой демократии':'pryamaya-demokratiya', 'Партия пенсионеров':'pensionery',
   'Коммунисты России':'kommunisty-rossii'};
 let lastParties = null, lastPartyCompare = null, lastPartySelected = '';
+let partyForecastMode = (() => { try { return localStorage.getItem('partyForecastMode') === 'all' ? 'all' : 'day'; } catch { return 'day'; } })();
 let partyForecastOn = (() => { try { return localStorage.getItem('partyForecast') !== 'off'; } catch { return true; } })();
 let partyCompareOn = (() => { try { return localStorage.getItem('partyCompare') !== 'off'; } catch { return true; } })();
 let kpiBase = (() => { try { return localStorage.getItem('kpiBase') === 'avg2' ? 'avg2' : 'prev'; } catch { return 'prev'; } })();
@@ -90,12 +91,14 @@ function renderPartyChart() {
   if (!lastParties) return;
   const compare = lastPartyCompare && lastPartyCompare.average ? lastPartyCompare : null;
   const dayInfo = lastForecastData && lastForecastData.forecast_day;
-  const forecastRows = (forecastMode === 'day' ? dayInfo && dayInfo.forecast : lastForecastData && lastForecastData.forecast);
+  const forecastRows = (partyForecastMode === 'day' ? dayInfo && dayInfo.forecast : lastForecastData && lastForecastData.forecast);
   const forecastOf = new Map((forecastRows ? forecastRows.rows : []).map(r => [r.label, r.forecast]));
   $('#party-compare-switch').hidden = !compare;
   $('#party-forecast-switch').hidden = !forecastOf.size;
   $('#party-compare').checked = partyCompareOn;
   $('#party-forecast').checked = partyForecastOn;
+  $('#party-forecast-mode').hidden = !forecastOf.size || !partyForecastOn;
+  document.querySelectorAll('[data-pfmode]').forEach(button => button.classList.toggle('active', button.dataset.pfmode === partyForecastMode));
   const showAverage = Boolean(compare) && partyCompareOn, showForecast = forecastOf.size > 0 && partyForecastOn;
   if (!showAverage && !showForecast) {
     $('#party-legend').innerHTML = '';
@@ -106,7 +109,7 @@ function renderPartyChart() {
   const average = showAverage ? compare.average : null;
   const averageDays = showAverage ? compare.days.map(d => shortDay(d.day)).join(', ') : '';
   const mainLabel = lastPartySelected === 'all' ? 'Все дни' : shortDay(lastPartySelected || (compare && compare.selected) || '0000-00-00');
-  const forecastTitle = forecastMode === 'day' && dayInfo && dayInfo.day ? `Прогноз на день (${shortDay(dayInfo.day)})` : 'Общий прогноз';
+  const forecastTitle = partyForecastMode === 'day' && dayInfo && dayInfo.day ? `Прогноз на день (${shortDay(dayInfo.day)})` : 'Общий прогноз';
   const avgIndex = 1, forecastIndex = average ? 2 : 1;
   const valuesOf = item => [item.percent, ...(average ? [average.shares[item.label] ?? 0] : []), ...(showForecast ? [forecastOf.get(item.label) ?? 0] : [])];
   const top = Math.max(1, ...items.flatMap(valuesOf));
@@ -677,6 +680,11 @@ $('#party-forecast').addEventListener('change', event => {
   try { localStorage.setItem('partyForecast', partyForecastOn ? 'on' : 'off'); } catch { /* storage may be blocked */ }
   renderPartyChart();
 });
+document.querySelectorAll('[data-pfmode]').forEach(button => button.addEventListener('click', () => {
+  partyForecastMode = button.dataset.pfmode;
+  try { localStorage.setItem('partyForecastMode', partyForecastMode); } catch { /* storage may be blocked */ }
+  renderPartyChart();
+}));
 $('#refresh').addEventListener('click',load);
 $('#day').addEventListener('change',event => { filters.day=event.target.value; filters.precinct=''; load(); });
 $('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });
