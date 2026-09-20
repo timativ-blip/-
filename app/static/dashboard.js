@@ -55,6 +55,9 @@ const PARTY_LOGOS = {'Единая Россия':'edinaya-rossiya', 'КПРФ':'
 let lastParties = null;
 let kpiBase = (() => { try { return localStorage.getItem('kpiBase') === 'avg2' ? 'avg2' : 'prev'; } catch { return 'prev'; } })();
 let lastCompare = null, lastSummary = null;
+let forecastMode = (() => { try { return localStorage.getItem('forecastMode') === 'day' ? 'day' : 'all'; } catch { return 'all'; } })();
+let lastForecastData = null;
+const FORECAST_NOTE_ALL = 'Прогноз считается по всем данным (все дни, вся область) и не зависит от фильтров. «Изменение» — прогноз минус «Ответили». «Тренд» — на сколько сдвинулась оценка за последние 30% поступивших данных. Это оценка по опросу на участках, а не официальный результат.';
 // One hue for every other chart: the bigger the value, the darker and richer the bar (scaled between the chart's own min and max).
 function scaleColor(value, values) {
   const low = Math.min(...values), high = Math.max(...values), from = [196, 216, 190], to = [33, 70, 48];
@@ -121,6 +124,18 @@ function renderForecastHistory(history) {
   }).join('');
   const legend = history.series.map((serie, k) => `<span class="legend-item"><svg width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" fill="${SERIES_COLORS[k]}"/></svg>${escapeHTML(serie.label)}</span>`).join('');
   box.innerHTML = `<svg class="history-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Динамика прогноза">${grid}${ticks}${lines}</svg><div class="legend">${legend}</div><p class="panel-note">Ось X — доля поступивших данных по времени заполнения анкет; на каждой точке прогноз пересчитан по всем анкетам до неё.</p>`;
+}
+function renderForecastMode() {
+  const data = lastForecastData;
+  if (!data) return;
+  const dayInfo = data.forecast_day || {day: null, forecast: null};
+  const label = dayInfo.day ? dayInfo.day.slice(8, 10) + '.' + dayInfo.day.slice(5, 7) : '';
+  $('#forecast-day-button').textContent = label ? `Прогноз на день (${label})` : 'Прогноз на день';
+  document.querySelectorAll('[data-fmode]').forEach(button => button.classList.toggle('active', button.dataset.fmode === forecastMode));
+  $('#forecast-note').textContent = forecastMode === 'day'
+    ? `Прогноз построен только по анкетам за ${dayInfo.day ? dateLabel(dayInfo.day) : 'выбранный день'} (вся область, фильтры округа и ТИК не влияют). Он показывает, как выглядит расклад сегодняшнего дня отдельно от прошлых; объём данных за один день меньше, поэтому коридор шире. «Изменение» — прогноз минус «Ответили». Это оценка по опросу на участках, а не официальный результат.`
+    : FORECAST_NOTE_ALL;
+  renderForecast(forecastMode === 'day' ? dayInfo.forecast : data.forecast, data.summary);
 }
 function renderForecast(forecast, summary) {
   const body = $('#forecast-body'), warn = $('#forecast-warn');
@@ -501,7 +516,7 @@ function renderFilters(data) {
 function render(data) {
   renderFilters(data); renderSummary(data.summary, data.compare); lastParties = data.parties; renderPartyChart();
   renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender',colors:GENDER_COLORS}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
-  renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderMap(data.map); renderForecast(data.forecast, data.summary);
+  renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderMap(data.map); lastForecastData = data; renderForecastMode();
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
   const scopeLabel = filters.tik || (filters.okrug ? 'Округ ' + filters.okrug : '');
   $('#period-label').textContent = `${dateLabel(data.selected_day)}${scopeLabel ? ' · ' + scopeLabel : ''}`;
@@ -589,6 +604,11 @@ document.querySelectorAll('[data-base]').forEach(button => button.addEventListen
   if (activeDetail && activeDetail.kind === 'kpi') void refreshDetail(false);
 }));
 document.querySelectorAll('[data-base]').forEach(button => button.classList.toggle('active', button.dataset.base === kpiBase));
+document.querySelectorAll('[data-fmode]').forEach(button => button.addEventListener('click', () => {
+  forecastMode = button.dataset.fmode;
+  try { localStorage.setItem('forecastMode', forecastMode); } catch { /* storage may be blocked */ }
+  renderForecastMode();
+}));
 $('#refresh').addEventListener('click',load);
 $('#day').addEventListener('change',event => { filters.day=event.target.value; filters.precinct=''; load(); });
 $('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });

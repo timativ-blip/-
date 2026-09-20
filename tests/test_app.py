@@ -1212,3 +1212,24 @@ def test_kpi_base_is_validated(settings, monkeypatch):
         client.post("/api/dashboard/login", json={"code": "coordinator-secret"})
         assert client.get("/api/dashboard/detail", params={"kind": "kpi", "key": "total", "base": "avg2"}).status_code == 200
         assert client.get("/api/dashboard/detail", params={"kind": "kpi", "key": "total", "base": "bogus"}).status_code == 422
+
+
+def test_forecast_for_the_selected_day_only(settings):
+    rows = mk_rows(settings, [(BAL, 40, FOCUS, "Мужской", "25–34", "a"), (BAL, 40, "Единая Россия", "Мужской", "25–34", "b")])
+    day = "2026-09-16"
+    other = [list(r) for r in rows]
+    for r in other:
+        r[2] = "2026-09-17"
+        r[1] = r[1].replace(day, "2026-09-17")
+        r[7] = "Единая Россия"
+        r[0] = r[0] + "-x"
+    both = dashboard_snapshot(rows + other, settings)
+    assert both["forecast_day"]["day"] == "2026-09-17"  # the latest day when nothing is selected
+    assert both["forecast_day"]["forecast"]["scope"]["days"] == ["2026-09-17"]
+    assert both["forecast"]["scope"]["days"] == [day, "2026-09-17"]
+    first = dashboard_snapshot(rows + other, settings, requested_day=day)["forecast_day"]
+    assert first["day"] == day and first["forecast"]["scope"]["anket"] == 80
+    nl = next(r for r in first["forecast"]["rows"] if r["label"] == FOCUS)["forecast"]
+    nl_all = next(r for r in both["forecast"]["rows"] if r["label"] == FOCUS)["forecast"]
+    assert nl > nl_all  # that day alone is friendlier to the focus party than the two days together
+    assert dashboard_snapshot([], settings)["forecast_day"]["forecast"] is None

@@ -774,7 +774,7 @@ def forecast_shares(rows, weights=None):
         "flow": _flow_snapshot(rows),
         "deg": {**DEG_CONTEXT, "scenarios": scenarios},
     }
-    if len(_FORECAST_CACHE) >= 4:
+    if len(_FORECAST_CACHE) >= 8:
         _FORECAST_CACHE.clear()
     _FORECAST_CACHE[fingerprint] = result
     return result
@@ -1772,6 +1772,15 @@ def build_swing(okrug_rows):
             "region_n": sum(region.values())}
 
 
+def forecast_for_day(rows, settings, requested_day):
+    """The same forecast, built only from the selected day's surveys (the latest day when "all days" is chosen)."""
+    dates, selected, _day_rows, _scope = scope_rows(rows, settings, requested_day, None, None, None)
+    day = selected if selected != ALL_DAYS else (dates[0] if dates else None)
+    if not day:
+        return {"day": None, "forecast": None}
+    return {"day": day, "forecast": forecast_shares([r for r in rows if r["day"] == day], territory_weights(settings))}
+
+
 def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=None,
                         requested_tik=None, requested_precinct=None, statuses=None):
     """Build a small, privacy-conscious aggregate from rows in Google Sheets."""
@@ -1981,6 +1990,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
         "swing": build_swing(okrug_rows), "map": build_map_data(day_rows),
         "compare": {base: kpi_compare(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct, base) for base in KPI_BASES},
         "forecast": forecast_shares(rows, territory_weights(settings)),
+        "forecast_day": forecast_for_day(rows, settings, requested_day),
         "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,

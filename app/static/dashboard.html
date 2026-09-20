@@ -57,10 +57,11 @@
         <article class="panel party-panel"><header><div><p class="kicker">РЕЗУЛЬТАТЫ</p><h2>Ответы по партиям</h2></div><div class="tabs" role="tablist" aria-label="Режим"><button class="tab active" type="button" role="tab" aria-selected="true" data-tab="answers">Ответы</button><button class="tab" type="button" role="tab" aria-selected="false" data-tab="forecast">Прогноз</button></div></header>
           <div id="tab-answers"><p class="panel-note tab-note">доля от всех анкет</p><div id="party-chart"></div></div>
           <div id="tab-forecast" hidden>
+            <div class="forecast-modes"><div class="seg-group" role="group" aria-label="Период прогноза"><button class="seg active" type="button" data-fmode="all">Общий прогноз</button><button class="seg" type="button" data-fmode="day" id="forecast-day-button">Прогноз на день</button></div></div>
             <p id="forecast-summary" class="insight"></p>
             <div id="forecast-warn" class="alert" hidden></div>
             <div class="table-scroll"><table class="forecast"><thead><tr><th>Партия</th><th>Ответили, %</th><th>Прогноз, %</th><th>Изменение, п.п.</th><th>Коридор 95%</th><th>Тренд, п.п.</th><th>2021, % (разница)</th></tr></thead><tbody id="forecast-body"></tbody></table></div>
-            <p class="panel-note table-note">Прогноз считается по всем данным (все дни, вся область) и не зависит от фильтров. «Изменение» — прогноз минус «Ответили». «Тренд» — на сколько сдвинулась оценка за последние 30% поступивших данных. Это оценка по опросу на участках, а не официальный результат.</p>
+            <p id="forecast-note" class="panel-note table-note">Прогноз считается по всем данным (все дни, вся область) и не зависит от фильтров. «Изменение» — прогноз минус «Ответили». «Тренд» — на сколько сдвинулась оценка за последние 30% поступивших данных. Это оценка по опросу на участках, а не официальный результат.</p>
             <h3>Как получен прогноз</h3>
             <ol id="forecast-steps" class="steps-list"></ol>
             <h3>Как менялась оценка по мере поступления данных</h3>

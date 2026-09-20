@@ -50,3 +50,4 @@ details.method{margin:14px 0 6px;font-size:12px;color:var(--muted)}details.metho
 .metric.tone-yellow{background:#fbf1cc;border-color:#ebd98d}.metric.tone-yellow strong{color:#7a5f0f}
 .metric.tone-sage{background:#e4eedd;border-color:#cbdbc2}.metric.tone-blue{background:#e5edf3;border-color:#c8d8e4}.metric.tone-sand{background:#f1ebdd;border-color:#ddd2ba}
 .summary-toolbar{display:flex;align-items:center;gap:12px;margin:0 0 12px;font-size:12px;font-weight:700;color:var(--muted)}
+.forecast-modes{margin:0 0 14px}
