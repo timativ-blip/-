@@ -56,6 +56,13 @@ function database(mode, fn) {
 }
 const allSurveys = () => database('readonly', s => s.getAll());
 const putSurvey = item => database('readwrite', s => s.put(item));
+const putSurveys = items => database('readwrite', s => { let last; for (const item of items) last = s.put(item); return last; });
+const SYNC_PACK = 50;
+const STORAGE_TIMEOUT = 8000;
+const STORAGE_HUNG = 'Память телефона не отвечает: закройте браузер и откройте приложение заново. Анкеты не потеряны.';
+// A phone browser can leave IndexedDB hanging without any error; without a timeout the screen just freezes.
+const storageTimeout = promise => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('storage-timeout')), STORAGE_TIMEOUT))]);
+let syncTrouble = '';
 async function api(url, body, timeout = 7000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
@@ -78,27 +85,63 @@ function connection(ok, slow = false) {
   notice.hidden = ok && !slow;
   if (!notice.hidden) notice.innerHTML = `<strong>${ok ? 'Слабая связь' : 'Нет подключения'}</strong><br>Анкеты сохраняются на телефоне. Их можно отправить по SMS или автоматически после восстановления связи.<button data-action="sms">Открыть очередь и SMS</button>`;
 }
+async function sendOneByOne(items) {
+  // Fallback for a server without the batch endpoint: the original one-by-one delivery.
+  for (const item of items) {
+    const {received, rejected, problem, ...body} = item;
+    try {
+      await api('/api/surveys', body);
+      await putSurvey({...body, received:true});
+    } catch (e) {
+      if (e.status === 401) { authNeeded = true; return; }
+      if ([409,422].includes(e.status)) { await putSurvey({...body, received:false,rejected:true,problem:e.message}); continue; }
+      throw e;
+    }
+  }
+}
 async function syncUnlocked() {
   if (syncing) return;
   syncing = true;
   try {
-    const start = performance.now();
-    await api('/api/health');
-    connection(true, performance.now() - start > 3000);
-    const rows = await allSurveys();
-    for (const item of rows.filter(x => !x.received && !x.rejected)) {
-      const {received, rejected, problem, ...body} = item;
+    try {
+      const start = performance.now();
+      await api('/api/health', undefined, 10000);
+      connection(true, performance.now() - start > 3000);
+    } catch { connection(false); return; }
+    let queue;
+    try { queue = (await storageTimeout(allSurveys())).filter(x => !x.received && !x.rejected); }
+    catch { syncTrouble = STORAGE_HUNG; return; }
+    syncTrouble = '';
+    const total = queue.length;
+    let done = 0, failedInARow = 0;
+    for (let i = 0; i < total; i += SYNC_PACK) {
+      const pack = queue.slice(i, i + SYNC_PACK);
+      let answer;
       try {
-        await api('/api/surveys', body);
-        await putSurvey({...body, received:true});
+        answer = await api('/api/surveys/batch', {surveys: pack.map(({received, rejected, problem, ...body}) => body)}, 20000);
       } catch (e) {
         if (e.status === 401) { authNeeded = true; break; }
-        if ([409,422].includes(e.status)) { await putSurvey({...body, received:false,rejected:true,problem:e.message}); continue; }
-        throw e;
+        if (e.status === 404 || e.status === 405) { await sendOneByOne(queue.slice(i)); break; }
+        failedInARow += 1;
+        syncTrouble = 'Сервер отвечает медленно, повторим автоматически';
+        if (failedInARow >= 2) break;  // the network or server is really struggling: retry in 30 seconds
+        continue;
       }
+      failedInARow = 0; syncTrouble = '';
+      const updates = [];
+      answer.results.forEach((result, index) => {
+        const {received, rejected, problem, ...body} = pack[index];
+        if (result.saved) updates.push({...body, received:true});
+        else if ([409,422].includes(result.status)) updates.push({...body, received:false, rejected:true, problem:result.error});
+      });
+      try { await storageTimeout(putSurveys(updates)); }
+      catch { syncTrouble = STORAGE_HUNG; break; }
+      done += updates.length;
+      const line = $('#sync-status');
+      if (line) line.textContent = `Отправлено ${done} из ${total}…`;
     }
   } catch (e) {
-    connection(false);
+    syncTrouble = 'Не удалось отправить, повторим автоматически';
   } finally {
     syncing = false;
     if (screen === 'home') await updateStats();
@@ -111,7 +154,9 @@ async function sync() {
 }
 async function updateStats() {
   if (screen !== 'home') return;
-  const rows = await allSurveys();
+  let rows;
+  try { rows = await storageTimeout(allSurveys()); }
+  catch { const line = $('#sync-status'); if (line) line.textContent = STORAGE_HUNG; return; }
   const mine = rows.filter(x => x.profile.day === today() && x.profile.name === profile.name && x.profile.surname === profile.surname);
   const refused = mine.filter(x => x.party === 'refused').length;
   if (!$('#completed')) return;
@@ -119,7 +164,7 @@ async function updateStats() {
   $('#refused').textContent = refused;
   const pending = rows.filter(x => !x.received && !x.rejected).length;
   const rejected = rows.filter(x => x.rejected).length;
-  $('#sync-status').textContent = authNeeded ? 'Для отправки нужен код доступа' : rejected ? `Требуют внимания: ${rejected}. В очереди: ${pending}` : pending ? `Ожидают отправки: ${pending}` : 'Все анкеты переданы на сервер';
+  $('#sync-status').textContent = authNeeded ? 'Для отправки нужен код доступа' : rejected ? `Требуют внимания: ${rejected}. В очереди: ${pending}${pending && syncTrouble ? ' · ' + syncTrouble : ''}` : pending ? `Ожидают отправки: ${pending}${syncTrouble ? ' · ' + syncTrouble : ''}` : 'Все анкеты переданы на сервер';
   $('#auth-link').hidden = !authNeeded;
   $('#export-link').hidden = !rejected && !pending;
   await renderPendingSurveys('offline-queue', rows.filter(x => !x.received && !x.rejected));
@@ -306,11 +351,11 @@ async function submitSurvey() {
     // Freeze the id and timestamp before any I/O, so retries retain the same identity.
     draft.created_at ||= new Date().toISOString(); saveDraft();
     const body = {...draft, profile};
-    await putSurvey({...body, received:false});
+    await storageTimeout(putSurvey({...body, received:false}));
     draft = null; saveDraft(); go('home');
     toast(connected ? 'Анкета сохранена. Можно начинать следующий опрос.' : 'Нет подключения. Анкета сохранена на устройстве — отправьте её через SMS или дождитесь интернета.');
     void sync();
-  } catch (e) { error('Не удалось сохранить анкету на телефоне. Освободите место и повторите. Ответы остаются на экране.'); if (button) button.disabled = false; }
+  } catch (e) { error(e.message === 'storage-timeout' ? 'Память телефона не отвечает. Закройте браузер, откройте приложение заново и повторите: ответы сохранены на экране.' : 'Не удалось сохранить анкету на телефоне. Освободите место и повторите. Ответы остаются на экране.'); if (button) button.disabled = false; }
   finally { submitting = false; }
 }
 async function exportBackup() {

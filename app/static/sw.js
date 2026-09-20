@@ -1,4 +1,4 @@
-const CACHE = 'exit-poll-v7-offline';
+const CACHE = 'exit-poll-v8-offline';
 const FILES = [
   '/',
   '/static/app.js',

@@ -1299,3 +1299,29 @@ def test_roster_endpoint_takes_a_day(settings, monkeypatch):
         client.post("/api/dashboard/roster/login", json={"code": "exitpoll"})
         assert client.get("/api/dashboard/roster", params={"day": "2026-09-18"}).status_code == 200
         assert client.get("/api/dashboard/roster", params={"day": "oops"}).status_code == 422
+
+
+def test_import_backup_script_picks_only_undelivered_surveys():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("import_backup", Path(__file__).resolve().parent.parent / "scripts" / "import_backup.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    backup = {"exported_at": "x", "surveys": [{"id": "1", "party": "1", "received": True}, {"id": "2", "party": "1", "received": False},
+                                              {"id": "3", "party": "1", "received": False, "rejected": True, "problem": "x"},
+                                              {"id": "4", "party": "1", "received": False, "problem": None}]}
+    pending = module.pending_surveys(backup)
+    assert [s["id"] for s in pending] == ["2", "4"] and all(set(s) == {"id", "party"} for s in pending)
+    assert [s["id"] for s in module.pending_surveys(backup, send_all=True)] == ["1", "2", "3", "4"]
+    assert [len(p) for p in module.packs(list(range(120)))] == [50, 50, 20]
+
+
+def test_interviewer_app_sends_in_packs_with_timeouts_and_a_new_cache_version():
+    from pathlib import Path
+    static = Path(__file__).resolve().parent.parent / "app" / "static"
+    script = (static / "app.js").read_text(encoding="utf-8")
+    assert "/api/surveys/batch" in script and "const SYNC_PACK = 50" in script and "20000" in script  # packs of 50, 20 s per pack
+    assert "storageTimeout(" in script and "Память телефона не отвечает" in script  # a hung IndexedDB is reported, not silent
+    assert "sendOneByOne" in script  # an older server without the batch endpoint still works
+    assert "connection(false); return;" in script  # "no connection" only when the health check fails
+    assert "exit-poll-v8-offline" in (static / "sw.js").read_text(encoding="utf-8")
