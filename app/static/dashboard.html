@@ -55,7 +55,7 @@
 
       <section class="grid two">
         <article class="panel party-panel"><header><div><p class="kicker">РЕЗУЛЬТАТЫ</p><h2>Ответы по партиям</h2></div><div class="tabs" role="tablist" aria-label="Режим"><button class="tab active" type="button" role="tab" aria-selected="true" data-tab="answers">Ответы</button><button class="tab" type="button" role="tab" aria-selected="false" data-tab="forecast">Прогноз</button></div></header>
-          <div id="tab-answers"><p class="panel-note tab-note">доля от всех анкет</p><div id="party-chart"></div></div>
+          <div id="tab-answers"><div class="chart-tools"><p class="panel-note tab-note">доля от всех анкет</p><div class="chart-switches"><label class="switch" id="party-compare-switch" hidden><input id="party-compare" type="checkbox" checked><span class="switch-track"></span><span>Среднее по дням</span></label><label class="switch" id="party-forecast-switch" hidden><input id="party-forecast" type="checkbox" checked><span class="switch-track"></span><span>Прогноз</span></label></div></div><div id="party-legend" class="party-legend"></div><div id="party-chart"></div></div>
           <div id="tab-forecast" hidden>
             <div class="forecast-modes"><div class="seg-group" role="group" aria-label="Период прогноза"><button class="seg active" type="button" data-fmode="all">Общий прогноз</button><button class="seg" type="button" data-fmode="day" id="forecast-day-button">Прогноз на день</button></div></div>
             <p id="forecast-summary" class="insight"></p>

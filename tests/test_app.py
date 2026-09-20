@@ -1233,3 +1233,20 @@ def test_forecast_for_the_selected_day_only(settings):
     nl_all = next(r for r in both["forecast"]["rows"] if r["label"] == FOCUS)["forecast"]
     assert nl > nl_all  # that day alone is friendlier to the focus party than the two days together
     assert dashboard_snapshot([], settings)["forecast_day"]["forecast"] is None
+
+
+def test_party_compare_gives_other_days_and_their_average(settings):
+    spec = ([("2026-09-17", "09:00", BAL, "Единая Россия", "А")] * 6 + [("2026-09-17", "09:10", BAL, "Отказался отвечать", "А")] * 4
+            + [("2026-09-18", "09:00", BAL, "Единая Россия", "А")] * 5 + [("2026-09-18", "09:10", BAL, "Отказался отвечать", "А")] * 5
+            + [("2026-09-19", "09:00", BAL, "Единая Россия", "А")] * 3 + [("2026-09-19", "09:10", DMI, "Единая Россия", "Б")] * 1)
+    values = kpi_values(settings, spec)
+    compare = dashboard_snapshot(values, settings)["party_compare"]
+    assert compare["selected"] == "2026-09-19" and [d["day"] for d in compare["days"]] == ["2026-09-18", "2026-09-17"]
+    assert compare["days"][0]["shares"]["Единая Россия"] == 50.0 and compare["days"][1]["shares"]["Единая Россия"] == 60.0
+    assert compare["average"] == {"days": 2, "shares": {**compare["average"]["shares"], "Единая Россия": 55.0}}
+    assert compare["average"]["shares"]["Отказался отвечать"] == 45.0
+    every = dashboard_snapshot(values, settings, requested_day="all")["party_compare"]
+    assert [d["day"] for d in every["days"]] == ["2026-09-19", "2026-09-18", "2026-09-17"]  # all days are broken down
+    scoped = dashboard_snapshot(values, settings, requested_okrug=TIK_TO_OKRUG[DMI])["party_compare"]
+    assert scoped["days"] == [] or all(d["total"] for d in scoped["days"])
+    assert dashboard_snapshot([], settings)["party_compare"] == {"selected": dashboard_snapshot([], settings)["selected_day"], "days": [], "average": None}

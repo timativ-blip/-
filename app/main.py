@@ -1772,6 +1772,33 @@ def build_swing(okrug_rows):
             "region_n": sum(region.values())}
 
 
+PARTY_COMPARE_MAX_DAYS = 5
+
+
+def build_party_compare(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct):
+    """Share of all surveys per answer on the other days, for bars next to the selected period's bars.
+    A specific day is compared with every other day; "all days" is broken down into its days. Same okrug/TIK/UIK filters."""
+    dates, selected, _day_rows, _scope = scope_rows(rows, settings, requested_day, None, None, None)
+    others = [d for d in dates if d != selected]
+    others = sorted(others, reverse=True)[:PARTY_COMPARE_MAX_DAYS]
+    labels = [label for party_id, label in PARTIES if party_id != "2"]
+    days = []
+    for day in others:
+        scoped = [r for r in rows if r["day"] == day
+                  and (not requested_okrug or TIK_TO_OKRUG.get(r["tik"]) == requested_okrug)
+                  and (not requested_tik or r["tik"] == requested_tik)
+                  and (not requested_precinct or r["precinct_id"] == requested_precinct)]
+        if not scoped:
+            continue
+        counts = Counter(r["answer"] for r in scoped)
+        days.append({"day": day, "total": len(scoped),
+                     "shares": {label: round(counts[label] * 100 / len(scoped), 1) for label in labels}})
+    average = None
+    if days:
+        average = {"days": len(days), "shares": {label: round(sum(d["shares"][label] for d in days) / len(days), 1) for label in labels}}
+    return {"selected": selected, "days": days, "average": average}
+
+
 def forecast_for_day(rows, settings, requested_day):
     """The same forecast, built only from the selected day's surveys (the latest day when "all days" is chosen)."""
     dates, selected, _day_rows, _scope = scope_rows(rows, settings, requested_day, None, None, None)
@@ -1991,6 +2018,7 @@ def dashboard_snapshot(values, settings, requested_day=None, requested_okrug=Non
         "compare": {base: kpi_compare(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct, base) for base in KPI_BASES},
         "forecast": forecast_shares(rows, territory_weights(settings)),
         "forecast_day": forecast_for_day(rows, settings, requested_day),
+        "party_compare": build_party_compare(rows, settings, requested_day, requested_okrug, requested_tik, requested_precinct),
         "anomalies": anomalies,
         "okrug_stats": okrug_stats, "tik_stats": tik_stats, "uik_stats": uik_stats,
         "interviewers": interviewers[:100], "recent": recent,

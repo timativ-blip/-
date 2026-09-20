@@ -52,7 +52,9 @@ const NEUTRAL_COLOR = '#B9C4BA';
 const PARTY_LOGOS = {'Единая Россия':'edinaya-rossiya', 'КПРФ':'kprf', 'ЛДПР':'ldpr', 'Новые люди':'novye-lyudi', 'Справедливая Россия':'spravedlivaya-rossiya',
   'Зелёные':'zelenye', 'Родина':'rodina', 'Яблоко':'yabloko', 'Партия прямой демократии':'pryamaya-demokratiya', 'Партия пенсионеров':'pensionery',
   'Коммунисты России':'kommunisty-rossii'};
-let lastParties = null;
+let lastParties = null, lastPartyCompare = null, lastPartySelected = '';
+let partyForecastOn = (() => { try { return localStorage.getItem('partyForecast') !== 'off'; } catch { return true; } })();
+let partyCompareOn = (() => { try { return localStorage.getItem('partyCompare') !== 'off'; } catch { return true; } })();
 let kpiBase = (() => { try { return localStorage.getItem('kpiBase') === 'avg2' ? 'avg2' : 'prev'; } catch { return 'prev'; } })();
 let lastCompare = null, lastSummary = null;
 let forecastMode = (() => { try { return localStorage.getItem('forecastMode') === 'day' ? 'day' : 'all'; } catch { return 'all'; } })();
@@ -82,8 +84,63 @@ function renderColumns(target, items, {compact = false, kind = '', keyOf = item 
     el.style.background = colors ? (colors[item.label] || NEUTRAL_COLOR) : scaleColor(item.count, items.map(x => x.count));
   });
 }
+function shortDay(iso) { return iso.slice(8, 10) + '.' + iso.slice(5, 7); }
+function hatch(color) { return `repeating-linear-gradient(135deg, ${color} 0 3px, rgba(255,255,255,.7) 3px 6px)`; }
 function renderPartyChart() {
-  if (lastParties) renderColumns('#party-chart', lastParties, {kind:'party', colors:PARTY_COLORS, logos:PARTY_LOGOS, fill:true});
+  if (!lastParties) return;
+  const compare = lastPartyCompare && lastPartyCompare.average ? lastPartyCompare : null;
+  const dayInfo = lastForecastData && lastForecastData.forecast_day;
+  const forecastRows = (forecastMode === 'day' ? dayInfo && dayInfo.forecast : lastForecastData && lastForecastData.forecast);
+  const forecastOf = new Map((forecastRows ? forecastRows.rows : []).map(r => [r.label, r.forecast]));
+  $('#party-compare-switch').hidden = !compare;
+  $('#party-forecast-switch').hidden = !forecastOf.size;
+  $('#party-compare').checked = partyCompareOn;
+  $('#party-forecast').checked = partyForecastOn;
+  const showAverage = Boolean(compare) && partyCompareOn, showForecast = forecastOf.size > 0 && partyForecastOn;
+  if (!showAverage && !showForecast) {
+    $('#party-legend').innerHTML = '';
+    renderColumns('#party-chart', lastParties, {kind:'party', colors:PARTY_COLORS, logos:PARTY_LOGOS, fill:true});
+    return;
+  }
+  const items = lastParties, box = $('#party-chart');
+  const average = showAverage ? compare.average : null;
+  const averageDays = showAverage ? compare.days.map(d => shortDay(d.day)).join(', ') : '';
+  const mainLabel = lastPartySelected === 'all' ? 'Все дни' : shortDay(lastPartySelected || (compare && compare.selected) || '0000-00-00');
+  const forecastTitle = forecastMode === 'day' && dayInfo && dayInfo.day ? `Прогноз на день (${shortDay(dayInfo.day)})` : 'Общий прогноз';
+  const avgIndex = 1, forecastIndex = average ? 2 : 1;
+  const valuesOf = item => [item.percent, ...(average ? [average.shares[item.label] ?? 0] : []), ...(showForecast ? [forecastOf.get(item.label) ?? 0] : [])];
+  const top = Math.max(1, ...items.flatMap(valuesOf));
+  const bar = (cls, i) => `<div class="column-bar ${cls}" data-i="${i}"></div>`;
+  const notes = item => {
+    const lines = [];
+    if (average) {
+      const diff = Math.round((item.percent - (average.shares[item.label] ?? 0)) * 10) / 10;
+      lines.push(`<div class="column-delta ${diff > 0 ? 'up' : diff < 0 ? 'down' : ''}" title="Разница выбранного периода со средним по другим дням">${diff > 0 ? '▲' : diff < 0 ? '▼' : '='} ${Math.abs(diff)}</div>`);
+    }
+    if (showForecast && forecastOf.has(item.label)) lines.push(`<div class="column-fc" title="${escapeHTML(forecastTitle)}"><small>прогноз</small>${forecastOf.get(item.label)}%</div>`);
+    return lines.join('');
+  };
+  box.innerHTML = `<div class="columns fill compare">${items.map(item => `<div class="column" data-kind="party" data-key="${escapeHTML(item.label)}" role="button" tabindex="0">${PARTY_LOGOS[item.label] ? `<span class="column-logo"><img src="/static/logos/${PARTY_LOGOS[item.label]}.png" alt="" width="34" height="34" loading="lazy"></span>` : '<span class="column-logo empty"></span>'}<div class="column-value"><strong>${number(item.count)}</strong>${item.percent}%</div><div class="bars">${bar('main', 0)}${average ? bar('avg', avgIndex) : ''}${showForecast ? bar('fc', forecastIndex) : ''}</div><div class="column-label" title="${escapeHTML(item.label)}">${escapeHTML(item.label)}</div>${notes(item)}</div>`).join('')}</div>`;
+  const room = box.querySelector('.columns').clientHeight;
+  const maxHeight = room > 0 ? Math.max(120, room - 225) : 250;
+  box.querySelectorAll('.column').forEach((column, index) => {
+    const item = items[index], color = PARTY_COLORS[item.label] || NEUTRAL_COLOR, values = valuesOf(item);
+    column.querySelectorAll('.column-bar').forEach(el => {
+      const i = Number(el.dataset.i), value = values[i];
+      const isAvg = Boolean(average) && i === avgIndex, isForecast = showForecast && i === forecastIndex;
+      el.style.height = (value ? Math.max(3, value / top * maxHeight) : 0) + 'px';
+      if (isForecast) { el.style.background = color + '2E'; el.style.border = `2px solid ${color}`; el.style.borderBottom = '0'; }
+      else el.style.background = isAvg ? hatch(color) : color;
+      el.title = i === 0 ? `${item.label}, ${mainLabel}: ${value}%` : isForecast ? `${item.label}, ${forecastTitle}: ${value}% (доля среди назвавших с учётом отказавшихся)` : `${item.label}, среднее по другим дням (${averageDays}): ${value}%`;
+    });
+  });
+  const key = (label, style) => `<span class="lg"><i data-style="${style}"></i>${escapeHTML(label)}</span>`;
+  $('#party-legend').innerHTML = key(mainLabel, 'main') + (average ? key(`Среднее по другим дням (${averageDays})`, 'avg') : '') + (showForecast ? key(forecastTitle, 'fc') : '');
+  $('#party-legend').querySelectorAll('i').forEach(el => {
+    const style = el.dataset.style;
+    el.style.background = style === 'avg' ? hatch('#46634d') : style === 'fc' ? '#46634d2E' : '#46634d';
+    if (style === 'fc') el.style.border = '2px solid #46634d';
+  });
 }
 function renderNewPeopleAge(groups) {
   renderColumns('#newpeople-age-chart', groups.map(g => ({...g, title: `${g.label}: ${number(g.count)} из ${number(g.total)} анкет`})), {kind:'age'});
@@ -136,6 +193,7 @@ function renderForecastMode() {
     ? `Прогноз построен только по анкетам за ${dayInfo.day ? dateLabel(dayInfo.day) : 'выбранный день'} (вся область, фильтры округа и ТИК не влияют). Он показывает, как выглядит расклад сегодняшнего дня отдельно от прошлых; объём данных за один день меньше, поэтому коридор шире. «Изменение» — прогноз минус «Ответили». Это оценка по опросу на участках, а не официальный результат.`
     : FORECAST_NOTE_ALL;
   renderForecast(forecastMode === 'day' ? dayInfo.forecast : data.forecast, data.summary);
+  renderPartyChart();
 }
 function renderForecast(forecast, summary) {
   const body = $('#forecast-body'), warn = $('#forecast-warn');
@@ -514,7 +572,7 @@ function renderFilters(data) {
   $('#precinct').disabled = !filters.tik;
 }
 function render(data) {
-  renderFilters(data); renderSummary(data.summary, data.compare); lastParties = data.parties; renderPartyChart();
+  renderFilters(data); renderSummary(data.summary, data.compare); lastParties = data.parties; lastPartyCompare = data.party_compare; lastPartySelected = data.selected_day; renderPartyChart();
   renderColumns('#gender-chart',data.genders,{compact:true,kind:'gender',colors:GENDER_COLORS}); renderColumns('#age-chart',data.ages,{compact:true,kind:'age'}); renderHours(data.hours);
   renderColumns('#newpeople-chart',data.new_people_by_okrug,{kind:'okrug',keyOf:item => item.label.split(' ').pop()}); renderNewPeopleAge(data.new_people_by_age); renderHeatmap(data.party_okrug); lastAgeHeat = data.party_age; renderAgeHeatmap(lastAgeHeat); renderSwing(data.swing); renderMap(data.map); lastForecastData = data; renderForecastMode();
   renderGeo(data); renderInterviewers(data.interviewers, data.summary.total); renderAnomalies(data.anomalies); renderRecent(data.recent);
@@ -609,6 +667,16 @@ document.querySelectorAll('[data-fmode]').forEach(button => button.addEventListe
   try { localStorage.setItem('forecastMode', forecastMode); } catch { /* storage may be blocked */ }
   renderForecastMode();
 }));
+$('#party-compare').addEventListener('change', event => {
+  partyCompareOn = event.target.checked;
+  try { localStorage.setItem('partyCompare', partyCompareOn ? 'on' : 'off'); } catch { /* storage may be blocked */ }
+  renderPartyChart();
+});
+$('#party-forecast').addEventListener('change', event => {
+  partyForecastOn = event.target.checked;
+  try { localStorage.setItem('partyForecast', partyForecastOn ? 'on' : 'off'); } catch { /* storage may be blocked */ }
+  renderPartyChart();
+});
 $('#refresh').addEventListener('click',load);
 $('#day').addEventListener('change',event => { filters.day=event.target.value; filters.precinct=''; load(); });
 $('#okrug').addEventListener('change',event => { filters.okrug=event.target.value; filters.tik=''; filters.precinct=''; load(); });
